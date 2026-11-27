@@ -197,7 +197,6 @@ const DEFAULT_FIELDS = () => [
   { id: 'f_prod', label: '商品', type: 'select', source: 'name', required: true },
   { id: 'f_qty', label: '數量', type: 'number', required: true },
   { id: 'f_amt', label: '金額', type: 'amount', selectId: 'f_prod', qtyId: 'f_qty' },
-  { id: 'f_note', label: '備註', type: 'text', required: false },
 ];
 // 固定欄位（每筆登記只填一次）：第一個一定是「登記人」，名稱可改、不能刪
 const NAME_FIELD_ID = 'o_name';
@@ -426,7 +425,11 @@ function infoBlock(p) {
   const [code, cname] = cur(p.currency || 'JPY');
   return `<section class="card stack">
     ${p.description ? `<p style="margin:0;white-space:pre-wrap">${esc(p.description)}</p>` : ''}
-    <div class="calc small">💱 ${cname} → 台幣：${fmtNum(p.rate, 4)}</div>
+    <div class="rate-badge" role="note" aria-label="匯率：1 ${cname} 等於 ${fmtNum(p.rate, 4)} 台幣">
+      <span class="rate-tag">匯率</span>
+      <span class="rate-pair">${cname} <b aria-hidden="true">→</b> 台幣</span>
+      <span class="rate-num">${fmtNum(p.rate, 4)}</span>
+    </div>
   </section>`;
 }
 
@@ -765,11 +768,11 @@ function orderInput(f, v, ro = false) {
   return `<label class="f">${label}<input class="in" name="o:${esc(f.id)}" ${type} value="${esc(v)}" ${extra} ${req ? 'required' : ''} ${ro ? 'readonly' : ''}></label>`;
 }
 // 橫式登記表：每一項一列，欄位名稱只在最上面出現一次
-const COL_W = { select: 'minmax(150px,2fr)', number: '64px', amount: '96px', date: '150px', text: 'minmax(110px,1.4fr)' };
+const COL_W = { select: 'minmax(150px,2fr)', number: '64px', amount: '112px', date: '150px', text: 'minmax(110px,1.4fr)' };
 function regTable(p, fields, counts) {
-  const cols = `28px ${fields.map((f) => COL_W[f.type] || COL_W.text).join(' ')} 36px`;
-  const minW = 28 + 36 + fields.reduce((n, f) => n + ({ select: 150, number: 64, amount: 96, date: 150 }[f.type] || 110), 0) + (fields.length + 1) * 6;
-  const head = `<div class="rt-head" style="grid-template-columns:${cols}"><span>#</span>${fields.map((f) => `<span>${esc(f.label)}${f.required && f.type !== 'amount' ? '<b class="req">*</b>' : ''}</span>`).join('')}<span></span></div>`;
+  const cols = `28px 52px ${fields.map((f) => COL_W[f.type] || COL_W.text).join(' ')} 36px`;
+  const minW = 28 + 52 + 36 + fields.reduce((n, f) => n + ({ select: 150, number: 64, amount: 112, date: 150 }[f.type] || 110), 0) + (fields.length + 2) * 6;
+  const head = `<div class="rt-head" style="grid-template-columns:${cols}"><span>#</span><span>圖片</span>${fields.map((f) => `<span>${esc(f.label)}${f.required && f.type !== 'amount' ? '<b class="req">*</b>' : ''}</span>`).join('')}<span></span></div>`;
   return `<div class="card" style="padding:10px">
     <div class="rt-scroll"><div style="min-width:${minW}px">
       ${head}
@@ -786,6 +789,12 @@ function regTotalText(p, fields, rows = S.ui.rows) {
   const sum = amt ? rows.reduce((n, r) => n + amountFor(p, amt, r.values), 0) : 0;
   return `共 <b>${rows.length}</b> 項${amt ? `・合計 <b>${fmtTWD(sum)}</b>` : ''}`;
 }
+const thumbCell = (pr) => {
+  const src = safeImg(pr?.image);
+  return src
+    ? `<button type="button" class="rt-thumb" data-action="zoom-img" data-src="${esc(src)}" data-name="${esc(pr.name)}" aria-label="放大看 ${esc(pr.name)} 的圖片"><img src="${esc(src)}" alt=""></button>`
+    : `<span class="rt-thumb" aria-hidden="true">${pr ? '🛍️' : ''}</span>`;
+};
 function formRow(p, fields, row, i, counts, cols) {
   const ms = mainSelect(fields);
   const prods = sortedProducts();
@@ -805,7 +814,7 @@ function formRow(p, fields, row, i, counts, cols) {
     return `<div><input class="in" ${nm} value="${esc(v)}" maxlength="200" ${req ? 'required' : ''}></div>`;
   }).join('');
   return `<div class="item-row rt-row" data-row="${esc(row.id)}" style="grid-template-columns:${cols}">
-    <span class="rt-no">${i + 1}</span>${cells}
+    <span class="rt-no">${i + 1}</span>${thumbCell(productById(ms ? row.values[ms.id] : ''))}${cells}
     ${S.ui.rows.length > 1 ? `<button type="button" class="btn sm ghost icon-btn" data-action="del-row" data-row="${esc(row.id)}" aria-label="移除第 ${i + 1} 項">✕</button>` : '<span></span>'}
   </div>`;
 }
@@ -842,6 +851,8 @@ function updateRowCalc(rowEl) {
     tot.innerHTML = regTotalText(p, fields, rows);
   }
   const ms = mainSelect(fields);
+  const th = $('.rt-thumb', rowEl);
+  if (th && ms) th.outerHTML = thumbCell(productById(values[ms.id]));
   const hint = $('.stock-hint', rowEl);
   if (hint && ms) hint.textContent = stockHint(productById(values[ms.id]), countsByProduct(S.ui.editingOrder));
 }
@@ -1197,6 +1208,9 @@ const actions = {
   },
   'ov-seg': (el) => { S.ui.overviewSeg = el.dataset.seg; render(true); },
 
+  'zoom-img': (el) => openModal(`<h2>${esc(el.dataset.name)}</h2>
+    <img src="${esc(el.dataset.src)}" alt="${esc(el.dataset.name)}" style="width:100%;max-height:60vh;object-fit:contain;border:var(--line) solid var(--ink);border-radius:var(--r-md);background:#fff">
+    <button class="btn primary block" style="margin-top:12px" data-action="modal-cancel">關閉</button>`),
   'modal-bg': (el, e) => { if (e.target === el) closeModal(null); },
   'modal-cancel': () => closeModal(null),
   'modal-ok': () => closeModal(true),
