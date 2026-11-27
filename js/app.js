@@ -62,6 +62,7 @@ const STATUS = {
 const REVIEW = { pending: '待審核', approved: '已通過', rejected: '未通過' };
 
 function toast(msg) {
+  document.querySelectorAll('.toast').forEach((t) => t.remove());
   const el = document.createElement('div');
   el.className = 'toast'; el.textContent = msg; el.setAttribute('role', 'status');
   document.body.appendChild(el);
@@ -194,6 +195,14 @@ const DEFAULT_FIELDS = () => [
   { id: 'f_amt', label: '金額', type: 'amount', selectId: 'f_prod', qtyId: 'f_qty' },
   { id: 'f_note', label: '備註', type: 'text', required: false },
 ];
+// 固定欄位（每筆登記只填一次）：第一個一定是「登記人」，名稱可改、不能刪
+const NAME_FIELD_ID = 'o_name';
+const DEFAULT_ORDER_FIELDS = () => [{ id: NAME_FIELD_ID, label: '登記人', type: 'text', required: true, fixed: true, public: true }];
+function orderFieldsOf(p) {
+  const list = Array.isArray(p?.orderFields) && p.orderFields.length ? p.orderFields : DEFAULT_ORDER_FIELDS();
+  return list.some((f) => f.id === NAME_FIELD_ID) ? list : [...DEFAULT_ORDER_FIELDS(), ...list];
+}
+const ORDER_FIELD_TYPES = { text: '輸入欄（文字）', number: '輸入欄（數字）', date: '日期' };
 const fieldsOf = (p) => (Array.isArray(p?.fields) && p.fields.length ? p.fields : DEFAULT_FIELDS());
 const mainSelect = (fields) => fields.find((f) => f.type === 'select');
 function qtyFieldOf(fields) {
@@ -260,12 +269,12 @@ function subscribeProject(pid) {
   if (S.cur.pid === pid) return;
   S.cur.unsubs.forEach((u) => u && u());
   S.cur = { pid, project: undefined, products: [], orders: [], unsubs: [], denied: false };
-  S.ui.fieldsDraft = null; S.ui.fieldsDirty = false; S.ui.editingOrder = null; S.ui.rows = null;
+  S.ui.fieldsDraft = null; S.ui.orderDraft = null; S.ui.fieldsDirty = false; S.ui.editingOrder = null; S.ui.rows = null;
   if (!pid) return;
   const st = S.store;
   S.cur.unsubs.push(st.watchProject(pid, (p) => {
     S.cur.project = p;
-    if (!S.ui.fieldsDirty) S.ui.fieldsDraft = null;
+    if (!S.ui.fieldsDirty) { S.ui.fieldsDraft = null; S.ui.orderDraft = null; }
     if (p && (p.status !== 'locked' && !p.hidden || S.user?.isOwner)) ensureSubs();
     render();
   }));
@@ -473,6 +482,32 @@ function ratePreview(code, rate) {
   return `1 ${code} ≈ NT$ ${fmtNum(r, 4)} ・ ${fmtNum(base)} ${code} ≈ NT$ ${fmtNum(base * r)}`;
 }
 
+function setModalImage(src, isUrl = false) {
+  if (!$('#pm-thumb')) return;
+  S.ui.modalImage = src;
+  $('#pm-url').value = isUrl ? src : '';
+  $('#pm-thumb').innerHTML = `<img src="${esc(src)}" alt="">`;
+  toast('圖片已放上 ✓');
+}
+async function imageFromTransfer(dt) {
+  const file = [...(dt?.files || [])].find((f) => f.type.startsWith('image/'))
+    || [...(dt?.items || [])].find((i) => i.kind === 'file' && i.type.startsWith('image/'))?.getAsFile();
+  if (file) { try { setModalImage(await fileToDataURL(file)); } catch (e) { toast(e.message); } return true; }
+  return false;
+}
+// 商品視窗開著時：Ctrl+V 貼圖、拖曳圖片
+document.addEventListener('paste', async (e) => {
+  if (!$('#pm-thumb')) return;
+  if (await imageFromTransfer(e.clipboardData)) { e.preventDefault(); return; }
+  const txt = e.clipboardData?.getData('text/plain')?.trim() || '';
+  if (e.target.id !== 'pm-url' && /^https:\/\/\S+\.(png|jpe?g|gif|webp|avif)(\?\S*)?$/i.test(txt)) { e.preventDefault(); setModalImage(txt, true); }
+});
+document.addEventListener('dragover', (e) => { if ($('#pm-thumb') && e.target.closest('.modal')) e.preventDefault(); });
+document.addEventListener('drop', async (e) => {
+  if (!$('#pm-thumb') || !e.target.closest('.modal')) return;
+  e.preventDefault();
+  if (!(await imageFromTransfer(e.dataTransfer))) toast('請拖曳圖片檔');
+});
 function productModal(pr) {
   const p = S.cur.project;
   const code = p.currency || 'JPY';
@@ -482,7 +517,8 @@ function productModal(pr) {
       <div class="row">
         <div class="thumb" id="pm-thumb">${safeImg(pr?.image) ? `<img src="${esc(pr.image)}" alt="">` : '🛍️'}</div>
         <div class="stack grow">
-          <button class="btn sm" data-action="pm-upload">📷 上傳圖片</button>
+          <div class="row"><button class="btn sm" data-action="pm-upload">📷 上傳圖片</button><button class="btn sm" data-action="pm-paste">📋 貼上圖片</button></div>
+          <p class="small muted" style="margin:0">複製圖片後，在這個視窗直接按 Ctrl+V（Mac：⌘V）也可以；或把圖片拖到左邊方框。</p>
           <input class="in" id="pm-url" placeholder="或貼上圖片網址 https://…" value="${pr?.image && !pr.image.startsWith('data:') ? esc(pr.image) : ''}" data-input="pm-url">
           <button class="btn sm ghost" data-action="pm-clear-img">移除圖片</button>
         </div>
@@ -516,32 +552,63 @@ const SELECT_SOURCES = { name: '商品名稱', twd: '台幣金額', foreignPrice
 
 function fieldsConfig(p) {
   if (!S.ui.fieldsDraft) S.ui.fieldsDraft = JSON.parse(JSON.stringify(fieldsOf(p)));
-  const F = S.ui.fieldsDraft;
+  if (!S.ui.orderDraft) S.ui.orderDraft = JSON.parse(JSON.stringify(orderFieldsOf(p)));
+  const F = S.ui.fieldsDraft, O = S.ui.orderDraft;
   const selects = F.filter((f) => f.type === 'select');
   const numbers = F.filter((f) => f.type === 'number');
-  return `<p class="small muted" style="margin-top:0">客人在「登記表」每一項都要填這些欄位。登記人姓名會固定出現在最上面，不用另外加。</p>
-  ${F.map((f, i) => `<div class="field-cfg stack">
+  const moveDel = (g, i, n, fixed) => `
+      <button class="btn sm ghost icon-btn" data-action="fd-move" data-g="${g}" data-i="${i}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="往上">↑</button>
+      <button class="btn sm ghost icon-btn" data-action="fd-move" data-g="${g}" data-i="${i}" data-dir="1" ${i === n - 1 ? 'disabled' : ''} aria-label="往下">↓</button>
+      ${fixed ? '<span class="icon-btn" style="display:inline-grid;place-items:center" title="固定欄位不能刪除">🔒</span>' : `<button class="btn sm ghost icon-btn" data-action="fd-del" data-g="${g}" data-i="${i}" aria-label="刪除">✕</button>`}`;
+  const reqSel = (g, i, f) => f.fixed ? '<label class="f"><span>必填</span><input class="in" readonly value="一定要填"></label>'
+    : `<label class="f"><span>必填</span><select class="in" data-change="fd" data-g="${g}" data-i="${i}" data-k="required"><option value="1" ${f.required ? 'selected' : ''}>必填</option><option value="" ${!f.required ? 'selected' : ''}>選填</option></select></label>`;
+
+  const orderHTML = O.map((f, i) => `<div class="field-cfg stack">
     <div class="row">
-      <input class="in grow" value="${esc(f.label)}" placeholder="欄位名稱" data-input="fd" data-i="${i}" data-k="label" maxlength="20" aria-label="欄位名稱">
-      <button class="btn sm ghost icon-btn" data-action="fd-move" data-i="${i}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="往上">↑</button>
-      <button class="btn sm ghost icon-btn" data-action="fd-move" data-i="${i}" data-dir="1" ${i === F.length - 1 ? 'disabled' : ''} aria-label="往下">↓</button>
-      <button class="btn sm ghost icon-btn" data-action="fd-del" data-i="${i}" aria-label="刪除">✕</button>
+      <input class="in grow" value="${esc(f.label)}" placeholder="欄位名稱" data-input="fd" data-g="order" data-i="${i}" data-k="label" maxlength="20" aria-label="欄位名稱">
+      ${moveDel('order', i, O.length, f.fixed)}
     </div>
     <div class="f-grid">
-      <label class="f"><span>格式</span><select class="in" data-change="fd" data-i="${i}" data-k="type">${Object.entries(FIELD_TYPES).map(([k, l]) => `<option value="${k}" ${f.type === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-      ${f.type === 'amount' ? '<label class="f"><span>必填</span><input class="in" readonly value="自動帶入，客人不能改"></label>'
-        : `<label class="f"><span>必填</span><select class="in" data-change="fd" data-i="${i}" data-k="required"><option value="1" ${f.required ? 'selected' : ''}>必填</option><option value="" ${!f.required ? 'selected' : ''}>選填</option></select></label>`}
-      ${f.type === 'select' ? `<label class="f full"><span>下拉選單要顯示商品清單的哪一欄</span><select class="in" data-change="fd" data-i="${i}" data-k="source">${Object.entries(SELECT_SOURCES).map(([k, l]) => `<option value="${k}" ${(f.source || 'name') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>` : ''}
-      ${f.type === 'amount' ? `
-        <label class="f"><span>依哪個下拉選單的商品</span><select class="in" data-change="fd" data-i="${i}" data-k="selectId">${selects.map((s) => `<option value="${s.id}" ${f.selectId === s.id ? 'selected' : ''}>${esc(s.label)}</option>`).join('') || '<option value="">（請先新增下拉選單）</option>'}</select></label>
-        <label class="f"><span>乘上數量欄</span><select class="in" data-change="fd" data-i="${i}" data-k="qtyId"><option value="">不乘（單價）</option>${numbers.map((s) => `<option value="${s.id}" ${f.qtyId === s.id ? 'selected' : ''}>${esc(s.label)}</option>`).join('')}</select></label>` : ''}
+      ${f.fixed ? '<label class="f"><span>格式</span><input class="in" readonly value="輸入欄（文字）"></label>'
+        : `<label class="f"><span>格式</span><select class="in" data-change="fd" data-g="order" data-i="${i}" data-k="type">${Object.entries(ORDER_FIELD_TYPES).map(([k, l]) => `<option value="${k}" ${f.type === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>`}
+      ${reqSel('order', i, f)}
+      ${f.fixed ? '<p class="small muted full" style="margin:0">這一欄是登記人的名字，總覽上會顯示給大家看；欄位名稱可以自己改。</p>'
+        : `<label class="f full"><span>總覽要不要給大家看</span><select class="in" data-change="fd" data-g="order" data-i="${i}" data-k="public"><option value="" ${!f.public ? 'selected' : ''}>不公開（只有我看得到，適合聯絡方式）</option><option value="1" ${f.public ? 'selected' : ''}>公開顯示在登記總覽</option></select></label>`}
     </div>
-  </div>`).join('')}
+  </div>`).join('');
+
+  const itemHTML = F.map((f, i) => `<div class="field-cfg stack">
+    <div class="row">
+      <input class="in grow" value="${esc(f.label)}" placeholder="欄位名稱" data-input="fd" data-g="item" data-i="${i}" data-k="label" maxlength="20" aria-label="欄位名稱">
+      ${moveDel('item', i, F.length, false)}
+    </div>
+    <div class="f-grid">
+      <label class="f"><span>格式</span><select class="in" data-change="fd" data-g="item" data-i="${i}" data-k="type">${Object.entries(FIELD_TYPES).map(([k, l]) => `<option value="${k}" ${f.type === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      ${f.type === 'amount' ? '<label class="f"><span>必填</span><input class="in" readonly value="自動帶入，客人不能改"></label>' : reqSel('item', i, f)}
+      ${f.type === 'select' ? `<label class="f full"><span>下拉選單要顯示商品清單的哪一欄</span><select class="in" data-change="fd" data-g="item" data-i="${i}" data-k="source">${Object.entries(SELECT_SOURCES).map(([k, l]) => `<option value="${k}" ${(f.source || 'name') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>` : ''}
+      ${f.type === 'amount' ? `
+        <label class="f"><span>依哪個下拉選單的商品</span><select class="in" data-change="fd" data-g="item" data-i="${i}" data-k="selectId">${selects.map((x) => `<option value="${x.id}" ${f.selectId === x.id ? 'selected' : ''}>${esc(x.label)}</option>`).join('') || '<option value="">（請先新增下拉選單）</option>'}</select></label>
+        <label class="f"><span>乘上數量欄</span><select class="in" data-change="fd" data-g="item" data-i="${i}" data-k="qtyId"><option value="">不乘（單價）</option>${numbers.map((x) => `<option value="${x.id}" ${f.qtyId === x.id ? 'selected' : ''}>${esc(x.label)}</option>`).join('')}</select></label>` : ''}
+    </div>
+  </div>`).join('');
+
+  return `
+  <h2 class="section-title" style="margin-top:4px"><span class="dot" style="background:var(--coral)"></span>固定欄位</h2>
+  <p class="small muted" style="margin-top:0">每筆登記只填一次，出現在登記表最上面（例如登記人、LINE 名稱、聯絡電話）。</p>
+  ${orderHTML}
   <div class="row" style="margin-top:12px">
-    <select class="in" id="fd-new-type" style="width:auto">${Object.entries(FIELD_TYPES).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
-    <button class="btn yellow" data-action="fd-add">＋ 新增欄位</button>
+    <select class="in" id="fd-new-type-order" style="width:auto">${Object.entries(ORDER_FIELD_TYPES).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
+    <button class="btn yellow" data-action="fd-add" data-g="order">＋ 新增固定欄位</button>
   </div>
-  <div class="row" style="margin-top:16px;justify-content:flex-end">
+
+  <h2 class="section-title"><span class="dot" style="background:var(--yellow)"></span>每項欄位（可重複）</h2>
+  <p class="small muted" style="margin-top:0">客人每按一次「＋ 再登記一項」，就會多一組這些欄位。</p>
+  ${itemHTML}
+  <div class="row" style="margin-top:12px">
+    <select class="in" id="fd-new-type-item" style="width:auto">${Object.entries(FIELD_TYPES).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
+    <button class="btn yellow" data-action="fd-add" data-g="item">＋ 新增每項欄位</button>
+  </div>
+  <div class="row" style="margin-top:20px;justify-content:flex-end">
     ${S.ui.fieldsDirty ? '<span class="small muted grow">有尚未儲存的變更</span><button class="btn ghost" data-action="fd-reset">還原</button>' : ''}
     <button class="btn primary" data-action="fd-save">儲存欄位設定</button>
   </div>`;
@@ -571,6 +638,11 @@ const selectText = (f, pr, p) => {
 };
 const productNameOf = (item) => productById(item.productId)?.name || item.productName || '（商品已刪除）';
 
+function orderExtras(p, o, onlyPublic) {
+  const html = orderFieldsOf(p).filter((f) => f.id !== NAME_FIELD_ID && (!onlyPublic || f.public))
+    .map((f) => { const v = o.orderValues?.[f.id]; return v ? `<span><span class="muted">${esc(f.label)}：</span>${esc(v)}</span>` : ''; }).join('');
+  return html ? `<div class="fields">${html}</div>` : '';
+}
 function reviewList(p) {
   const fields = fieldsOf(p);
   const f = S.ui.reviewFilter;
@@ -580,14 +652,15 @@ function reviewList(p) {
   const filt = [['pending', '待審核'], ['done', '已處理'], ['all', '全部']];
   return `<div class="row" style="margin-bottom:12px">${filt.map(([k, l]) => `<button class="btn sm ${f === k ? 'yellow' : ''}" data-action="review-filter" data-f="${k}">${l}</button>`).join('')}</div>
   ${orders.length ? orders.map((o) => `<article class="card order">
-    <div class="row between"><div><b style="font-size:18px">${esc(o.buyerName)}</b> <span class="muted small">・${o.items?.length || 0} 項・最後編輯 ${fmtTime(o.updatedAt)}</span></div>
+    <div class="row between"><div><b style="font-size:18px">${esc(o.buyerName)}</b> <span class="muted small">・${o.items?.length || 0} 項・最後編輯 ${fmtTime(o.updatedAt)}</span>${orderExtras(p, o, false)}</div>
       ${o.review?.order === 'rejected' ? `<span class="chip rejected">整筆未通過</span>` : ''}</div>
     ${o.review?.order === 'rejected' && o.review.orderReason ? `<div class="reason">原因：${esc(o.review.orderReason)}</div>` : ''}
     <div class="order-items" style="margin-top:8px">${(o.items || []).map((it) => {
       const s = itemStatus(o, it);
       return `<div>
         <div class="row between"><b>${esc(productNameOf(it))}</b><span class="chip ${s.s}">${REVIEW[s.s]}</span></div>
-        <div class="fields">${itemSummary(p, it, fields)}</div>
+        ${orderExtras(p, o, true)}
+      <div class="fields">${itemSummary(p, it, fields)}</div>
         ${s.s === 'rejected' && s.reason && o.review?.order !== 'rejected' ? `<div class="reason">原因：${esc(s.reason)}</div>` : ''}
         <div class="row" style="margin-top:6px">
           <button class="btn sm green" data-action="rv-item" data-oid="${esc(o.id)}" data-iid="${esc(it.id)}" data-s="approved">通過</button>
@@ -611,19 +684,26 @@ function tabForm(p) {
   const editing = S.ui.editingOrder ? S.cur.orders.find((o) => o.id === S.ui.editingOrder) : null;
   if (!S.ui.rows) {
     S.ui.rows = editing ? editing.items.map((it) => ({ id: it.id, values: { ...it.values } })) : [{ id: newId(), values: {} }];
-    S.ui.buyerName = editing ? editing.buyerName : (localStorage.getItem('daigou-name') || '');
+    S.ui.orderValues = editing ? { ...(editing.orderValues || {}), [NAME_FIELD_ID]: editing.buyerName } : { [NAME_FIELD_ID]: localStorage.getItem('daigou-name') || '' };
   }
   if (!S.cur.products.length) return `${infoBlock(p)}<div class="empty" style="margin-top:16px">賣家還沒放商品喔，晚點再來看看～</div>`;
   const counts = countsByProduct(editing?.id);
   return `${infoBlock(p)}
   <form id="reg-form" class="stack" style="margin-top:16px" novalidate>
     ${editing ? `<div class="demo-banner">✏️ 正在修改你 ${fmtTime(editing.updatedAt)} 的登記 <button type="button" class="btn sm" data-action="cancel-edit">取消修改</button></div>` : ''}
-    <label class="f card"><span>登記人（你的名字／暱稱） <b class="req">*</b></span><input class="in" name="buyer" value="${esc(S.ui.buyerName)}" maxlength="40" autocomplete="nickname" required></label>
+    <div class="card stack">${orderFieldsOf(p).map((f) => orderInput(f, S.ui.orderValues[f.id] ?? '', !!editing)).join('')}${editing ? '<p class="small muted" style="margin:0">修改時不能改這些固定欄位，只能改下面的項目。</p>' : ''}</div>
     <div id="rows" style="padding-top:8px">${S.ui.rows.map((row, i) => formRow(p, fields, row, i, counts)).join('')}</div>
     <button type="button" class="btn block" data-action="add-row">＋ 再登記一項</button>
     <button type="submit" class="btn primary block" style="min-height:52px;font-size:18px">${editing ? '儲存修改' : '送出登記'}</button>
     <p class="small muted center" style="margin:0">送出後需等賣家審核，審核結果會顯示在「商品&登記總覽」。</p>
   </form>`;
+}
+function orderInput(f, v, ro = false) {
+  const req = f.required || f.fixed;
+  const label = `<span>${esc(f.label)}${req ? ' <b class="req">*</b>' : ''}</span>`;
+  const type = f.type === 'number' ? 'type="number" inputmode="decimal"' : f.type === 'date' ? 'type="date"' : '';
+  const extra = f.id === NAME_FIELD_ID ? 'maxlength="40" autocomplete="nickname"' : 'maxlength="200"';
+  return `<label class="f">${label}<input class="in" name="o:${esc(f.id)}" ${type} value="${esc(v)}" ${extra} ${req ? 'required' : ''} ${ro ? 'readonly' : ''}></label>`;
 }
 function formRow(p, fields, row, i, counts) {
   const ms = mainSelect(fields);
@@ -661,7 +741,8 @@ function stockHint(pr, counts) {
 function readRows() {
   const form = $('#reg-form');
   if (!form) return;
-  S.ui.buyerName = form.buyer.value;
+  S.ui.orderValues = {};
+  $$('[name^="o:"]', form).forEach((i) => { S.ui.orderValues[i.name.slice(2)] = i.value.trim(); });
   S.ui.rows = $$('.item-row', form).map((el) => {
     const values = {};
     $$('[name^="f:"]', el).forEach((i) => { values[i.name.slice(2)] = i.value.trim(); });
@@ -688,8 +769,10 @@ async function submitForm() {
   const fields = fieldsOf(p);
   const ms = mainSelect(fields);
   const qf = qtyFieldOf(fields);
-  const name = (S.ui.buyerName || '').trim();
-  if (!name) return toast('請填登記人');
+  const ofs = orderFieldsOf(p);
+  for (const f of ofs) if ((f.required || f.fixed) && !S.ui.orderValues[f.id]) return toast(`請填「${f.label}」`);
+  const name = (S.ui.orderValues[NAME_FIELD_ID] || '').trim();
+  const orderValues = Object.fromEntries(ofs.filter((f) => f.id !== NAME_FIELD_ID).map((f) => [f.id, S.ui.orderValues[f.id] || '']));
   const need = {};
   for (const [i, row] of S.ui.rows.entries()) {
     for (const f of fields) {
@@ -718,8 +801,8 @@ async function submitForm() {
   });
   const btn = $('#reg-form [type=submit]'); if (btn) btn.disabled = true;
   try {
-    if (S.ui.editingOrder) await S.store.updateOrder(p.id, S.ui.editingOrder, { buyerName: name, items, updatedAt: now });
-    else await S.store.createOrder(p.id, { buyerName: name, items, createdAt: now, updatedAt: now });
+    if (S.ui.editingOrder) await S.store.updateOrder(p.id, S.ui.editingOrder, { items, updatedAt: now });
+    else await S.store.createOrder(p.id, { buyerName: name, orderValues, items, createdAt: now, updatedAt: now });
     localStorage.setItem('daigou-name', name);
     toast(S.ui.editingOrder ? '已更新登記！' : '登記成功！等賣家審核喔');
     S.ui.editingOrder = null; S.ui.rows = null; S.ui.overviewSeg = 'reg';
@@ -743,7 +826,7 @@ function regOverview(p) {
   rows.sort((a, b) => k === 'name'
     ? sgn * productNameOf(a.it).localeCompare(productNameOf(b.it), 'zh-Hant') || (a.o.updatedAt - b.o.updatedAt)
     : sgn * ((a.o.updatedAt || 0) - (b.o.updatedAt || 0)));
-  const people = new Set(S.cur.orders.map((o) => o.buyerName)).size;
+  const people = new Set(S.cur.orders.map((o) => personKey(o.buyerName))).size;
   const myUid = S.user?.uid;
   const canEdit = (o) => !isOwner() && p.status === 'open' && o.uid === myUid && !o.review;
   const sorts = [['time-asc', '時間：舊→新'], ['time-desc', '時間：新→舊'], ['name-asc', '商品名稱：A→Z'], ['name-desc', '商品名稱：Z→A']];
@@ -751,7 +834,7 @@ function regOverview(p) {
       <span class="muted small">共 ${people} 人・${rows.length} 項</span>
       <select class="in" style="width:auto;min-height:40px" data-change="sort" aria-label="排序">${sorts.map(([v, l]) => `<option value="${v}" ${S.ui.sort === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
     </div>
-    ${rows.length ? rows.map(({ o, it, st }) => `<article class="card reg">
+    ${k === 'time' && rows.length ? groupedByPerson(p, fields, sgn, canEdit) : rows.length ? rows.map(({ o, it, st }) => `<article class="card reg">
       <div class="row between">
         <div class="grow"><b>${esc(o.buyerName)}</b> <span class="muted">・</span> ${esc(productNameOf(it))}</div>
         <span class="chip ${st.s}">${REVIEW[st.s]}</span>
@@ -763,6 +846,39 @@ function regOverview(p) {
         ${canEdit(o) ? `<span class="row"><button class="btn sm" data-action="edit-order" data-oid="${esc(o.id)}">修改</button><button class="btn sm ghost" data-action="cancel-order" data-oid="${esc(o.id)}">取消登記</button></span>` : ''}
       </div>
     </article>`).join('') : '<div class="empty">還沒有人登記</div>'}`;
+}
+// 同一個登記人（名字相同）的多次登記，合併在同一張卡片
+const personKey = (name) => String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+function groupedByPerson(p, fields, sgn, canEdit) {
+  const groups = new Map();
+  for (const o of S.cur.orders) {
+    const key = personKey(o.buyerName);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(o);
+  }
+  const list = [...groups.values()].map((orders) => {
+    orders.sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0));
+    return { orders, first: orders[0].updatedAt || 0 };
+  }).sort((a, b) => sgn * (a.first - b.first));
+  return list.map(({ orders }) => {
+    const last = orders[orders.length - 1];
+    const nItems = orders.reduce((n, o) => n + (o.items?.length || 0), 0);
+    return `<article class="card reg">
+      <div class="row between"><b style="font-size:18px">${esc(last.buyerName)}</b><span class="muted small">${orders.length > 1 ? `${orders.length} 次登記・` : ''}共 ${nItems} 項</span></div>
+      ${orderExtras(p, last, true)}
+      ${orders.map((o, k) => `<div class="order-items" style="margin-top:6px">
+        <div class="row between small muted" style="border-top:2px dashed rgba(62,58,57,.3);padding-top:6px">
+          <span>${orders.length > 1 ? `第 ${k + 1} 次・` : ''}最後編輯 ${fmtTime(o.updatedAt)}</span>
+          ${canEdit(o) ? `<span class="row"><button class="btn sm" data-action="edit-order" data-oid="${esc(o.id)}">修改</button><button class="btn sm ghost" data-action="cancel-order" data-oid="${esc(o.id)}">取消登記</button></span>` : ''}
+        </div>
+        ${(o.items || []).map((it) => { const st = itemStatus(o, it); return `<div style="border:0;padding:6px 0 2px">
+          <div class="row between"><span>${esc(productNameOf(it))}</span><span class="chip ${st.s}">${REVIEW[st.s]}</span></div>
+          <div class="fields" style="margin-top:0">${itemSummary(p, it, fields)}</div>
+          ${st.s === 'rejected' && st.reason ? `<div class="reason">未通過原因：${esc(st.reason)}</div>` : ''}
+        </div>`; }).join('')}
+      </div>`).join('')}
+    </article>`;
+  }).join('');
 }
 function productOverview(p) {
   const counts = countsByProduct();
@@ -806,6 +922,7 @@ function renderMenu() {
 // ------------------------------------------------------------
 //  動作
 // ------------------------------------------------------------
+const draftOf = (el) => (el.dataset.g === 'order' ? S.ui.orderDraft : S.ui.fieldsDraft);
 const actions = {
   'menu': () => $('#menu').classList.toggle('hidden'),
   'menu-close': () => $('#menu').classList.add('hidden'),
@@ -836,7 +953,7 @@ const actions = {
     const now = Date.now();
     const id = await S.store.createProject({
       title, description: '', currency: 'JPY', rate: 0.21, status: 'open', hidden: true,
-      cover: { type: 'svg', key: DEFAULT_ILLUSTRATION }, fields: DEFAULT_FIELDS(), createdAt: now, updatedAt: now,
+      cover: { type: 'svg', key: DEFAULT_ILLUSTRATION }, fields: DEFAULT_FIELDS(), orderFields: DEFAULT_ORDER_FIELDS(), createdAt: now, updatedAt: now,
     });
     toast('已建立（目前不公開，準備好再到首頁打開「公開」）');
     go(`#/p/${id}/products`);
@@ -878,6 +995,20 @@ const actions = {
     S.ui.modalImage = src; $('#pm-url').value = '';
     $('#pm-thumb').innerHTML = `<img src="${esc(src)}" alt="">`;
   },
+  async 'pm-paste'() {
+    if (!navigator.clipboard?.read) return toast('這個瀏覽器不支援按鈕貼上，請直接按 Ctrl+V');
+    try {
+      for (const item of await navigator.clipboard.read()) {
+        const t = item.types.find((x) => x.startsWith('image/'));
+        if (t) return setModalImage(await fileToDataURL(await item.getType(t)));
+        if (item.types.includes('text/plain')) {
+          const txt = (await (await item.getType('text/plain')).text()).trim();
+          if (/^https:\/\//.test(txt)) return setModalImage(txt, true);
+        }
+      }
+      toast('剪貼簿裡沒有圖片');
+    } catch { toast('沒有權限讀取剪貼簿，請直接按 Ctrl+V'); }
+  },
   'pm-clear-img': () => { S.ui.modalImage = ''; $('#pm-url').value = ''; $('#pm-thumb').innerHTML = '🛍️'; },
   async 'pm-save'(el) {
     const name = $('#pm-name').value.trim();
@@ -912,28 +1043,29 @@ const actions = {
 
   'fields-seg': (el) => { S.ui.fieldsSeg = el.dataset.seg; render(true); },
   'review-filter': (el) => { S.ui.reviewFilter = el.dataset.f; render(true); },
-  'fd-add': () => {
-    const type = $('#fd-new-type').value;
-    const F = S.ui.fieldsDraft;
-    const f = { id: 'f_' + newId(), label: { text: '新欄位', number: '數量', select: '商品', date: '日期', amount: '金額' }[type], type, required: false };
+  'fd-add': (el) => {
+    const g = el.dataset.g;
+    const type = $(`#fd-new-type-${g}`).value;
+    const F = draftOf(el);
+    const f = { id: (g === 'order' ? 'o_' : 'f_') + newId(), label: { text: g === 'order' ? 'LINE 名稱' : '新欄位', number: '數量', select: '商品', date: '日期', amount: '金額' }[type], type, required: false };
     if (type === 'select') f.source = 'name';
     if (type === 'amount') { f.selectId = F.find((x) => x.type === 'select')?.id || ''; f.qtyId = F.find((x) => x.type === 'number')?.id || ''; }
     F.push(f); S.ui.fieldsDirty = true; render(true);
   },
-  'fd-del': (el) => { S.ui.fieldsDraft.splice(+el.dataset.i, 1); S.ui.fieldsDirty = true; render(true); },
+  'fd-del': (el) => { const F = draftOf(el); if (F[+el.dataset.i]?.fixed) return; F.splice(+el.dataset.i, 1); S.ui.fieldsDirty = true; render(true); },
   'fd-move': (el) => {
-    const F = S.ui.fieldsDraft, i = +el.dataset.i, j = i + Number(el.dataset.dir);
+    const F = draftOf(el), i = +el.dataset.i, j = i + Number(el.dataset.dir);
     [F[i], F[j]] = [F[j], F[i]]; S.ui.fieldsDirty = true; render(true);
   },
-  'fd-reset': () => { S.ui.fieldsDraft = null; S.ui.fieldsDirty = false; render(true); },
+  'fd-reset': () => { S.ui.fieldsDraft = null; S.ui.orderDraft = null; S.ui.fieldsDirty = false; render(true); },
   async 'fd-save'() {
-    const F = S.ui.fieldsDraft;
-    if (!F.length) return toast('至少要有一個欄位');
-    if (F.some((f) => !f.label.trim())) return toast('有欄位沒有名稱');
+    const F = S.ui.fieldsDraft, O = S.ui.orderDraft;
+    if (!F.length) return toast('至少要有一個每項欄位');
+    if ([...F, ...O].some((f) => !String(f.label).trim())) return toast('有欄位沒有名稱');
     if (!F.some((f) => f.type === 'select')) return toast('至少要有一個「下拉選單」讓客人選商品');
     for (const f of F) if (f.type === 'amount' && !F.some((s) => s.id === f.selectId)) f.selectId = F.find((s) => s.type === 'select').id;
-    await S.store.updateProject(S.cur.pid, { fields: F, updatedAt: Date.now() });
-    S.ui.fieldsDirty = false; S.ui.fieldsDraft = null; toast('欄位設定已儲存 ✓'); render(true);
+    await S.store.updateProject(S.cur.pid, { fields: F, orderFields: O, updatedAt: Date.now() });
+    S.ui.fieldsDirty = false; S.ui.fieldsDraft = null; S.ui.orderDraft = null; toast('欄位設定已儲存 ✓'); render(true);
   },
 
   async 'rv-item'(el) {
@@ -986,9 +1118,9 @@ const changes = {
   'sort': (el) => { S.ui.sort = el.value; render(true); },
   'row-calc': (el) => updateRowCalc(el.closest('.item-row')),
   'fd': (el) => {
-    const f = S.ui.fieldsDraft[+el.dataset.i];
+    const f = draftOf(el)[+el.dataset.i];
     const k = el.dataset.k;
-    f[k] = k === 'required' ? !!el.value : el.value;
+    f[k] = (k === 'required' || k === 'public') ? !!el.value : el.value;
     if (k === 'type') {
       if (f.type === 'select' && !f.source) f.source = 'name';
       if (f.type === 'amount') { f.selectId = S.ui.fieldsDraft.find((x) => x.type === 'select')?.id || ''; f.qtyId = ''; f.required = false; }
@@ -999,7 +1131,7 @@ const changes = {
 const inputs = {
   'rate-preview': () => changes['rate-preview'](),
   'row-calc': (el) => updateRowCalc(el.closest('.item-row')),
-  'fd': (el) => { S.ui.fieldsDraft[+el.dataset.i][el.dataset.k] = el.value; S.ui.fieldsDirty = true; },
+  'fd': (el) => { draftOf(el)[+el.dataset.i][el.dataset.k] = el.value; S.ui.fieldsDirty = true; },
   'pm-fx': () => { $('#pm-twd').value = fmtTWD(Math.round(num($('#pm-fx').value) * num(S.cur.project.rate))); },
   'pm-url': (el) => {
     const u = el.value.trim();
@@ -1014,6 +1146,10 @@ document.addEventListener('click', async (e) => {
   if (!menu.classList.contains('hidden') && !e.target.closest('#menu') && el?.dataset.action !== 'menu') menu.classList.add('hidden');
   if (!el || el.disabled) return;
   if (el.tagName === 'SELECT') return;
+  // 點在下拉選單、輸入框或卡片上的賣家控制區時，不要當成點卡片
+  const field = e.target.closest('select, input, textarea, option');
+  if (field && field !== el) return;
+  if (el.dataset.action === 'open-project' && e.target.closest('.owner-ctrl')) return;
   if (el.closest('#menu') && el.dataset.action !== 'toggle-guest' && el.dataset.action !== 'toggle-motion') menu.classList.add('hidden');
   const fn = actions[el.dataset.action];
   if (!fn) return;
