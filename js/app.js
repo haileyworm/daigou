@@ -753,10 +753,12 @@ function tabForm(p) {
   const counts = countsByProduct(editing?.id);
   return `${infoBlock(p)}
   <form id="reg-form" class="stack" style="margin-top:16px" novalidate>
-    ${editing ? `<div class="demo-banner">✏️ 正在修改你 ${fmtTime(editing.updatedAt)} 的登記 <button type="button" class="btn sm" data-action="cancel-edit">取消修改</button></div>` : ''}
+    ${editing ? `<div class="edit-banner" role="alert">
+      <div><b>✏️ 你正在「修改」${fmtTime(editing.updatedAt)} 送出的舊登記</b><br><span class="small">送出後會<b>覆蓋</b>原本的內容，不是新增一筆。想新增請按「改成新增一筆」。</span></div>
+      <button type="button" class="btn sm" data-action="cancel-edit">改成新增一筆</button></div>` : ''}
     <div class="card stack">${orderFieldsOf(p).map((f) => orderInput(f, S.ui.orderValues[f.id] ?? '', !!editing)).join('')}${editing ? '<p class="small muted" style="margin:0">修改時不能改這些固定欄位，只能改下面的項目。</p>' : ''}</div>
     ${regTable(p, fields, counts)}
-    <button type="submit" class="btn primary block" style="min-height:52px;font-size:18px">${editing ? '儲存修改' : '送出登記'}</button>
+    <button type="submit" class="btn primary block" style="min-height:52px;font-size:18px">${editing ? '覆蓋原本的登記' : '送出登記'}</button>
     <p class="small muted center" style="margin:0">送出後需等賣家審核，審核結果會顯示在「商品&登記總覽」。</p>
   </form>`;
 }
@@ -893,6 +895,7 @@ async function submitForm() {
       amount: amtF ? amountFor(p, amtF, row.values) : (pr ? twdOf(pr, p) : 0),
     };
   });
+  if (S.ui.editingOrder && !(await askConfirm('確定要覆蓋原本的登記嗎？原本的內容會被取代，無法復原。', '確定覆蓋'))) return;
   const btn = $('#reg-form [type=submit]'); if (btn) btn.disabled = true;
   try {
     if (S.ui.editingOrder) await S.store.updateOrder(p.id, S.ui.editingOrder, { items, updatedAt: now });
@@ -1200,7 +1203,7 @@ const actions = {
 
   'add-row': () => { readRows(); S.ui.rows.push({ id: newId(), values: {} }); render(true); },
   'del-row': (el) => { readRows(); S.ui.rows = S.ui.rows.filter((r) => r.id !== el.dataset.row); render(true); },
-  'cancel-edit': () => { S.ui.editingOrder = null; S.ui.rows = null; render(true); },
+  'cancel-edit': () => { S.ui.editingOrder = null; S.ui.rows = null; render(true); toast('已改成新增一筆登記'); },
   'edit-order': (el) => { S.ui.editingOrder = el.dataset.oid; S.ui.rows = null; go(`#/p/${S.cur.pid}/form`); },
   async 'cancel-order'(el) {
     if (!(await askConfirm('確定取消這筆登記？', '取消登記'))) return;
@@ -1275,7 +1278,13 @@ document.addEventListener('input', (e) => {
 document.addEventListener('submit', (e) => {
   if (e.target.id === 'reg-form') { e.preventDefault(); submitForm(); }
 });
-window.addEventListener('hashchange', () => { $('#menu').classList.add('hidden'); render(true); });
+window.addEventListener('hashchange', () => {
+  $('#menu').classList.add('hidden');
+  // 離開登記表就結束「修改」狀態，回來時一定是新的登記
+  const r = parseRoute();
+  if (S.ui.editingOrder && !(r.name === 'project' && r.tab === 'form')) { S.ui.editingOrder = null; S.ui.rows = null; }
+  render(true);
+});
 
 // ------------------------------------------------------------
 //  啟動

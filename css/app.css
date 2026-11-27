@@ -247,3 +247,4 @@ html.reduce-motion *, html.reduce-motion *::before, html.reduce-motion *::after 
 button.rt-thumb { cursor: zoom-in; }
 .rt-thumb img { width: 100%; height: 100%; object-fit: cover; }
 .rt-row .rt-no { height: 52px; }
+.edit-banner { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; background: var(--coral); border: var(--line) solid var(--ink); border-radius: var(--r-md); padding: 10px 14px; box-shadow: var(--shadow-sm); }
