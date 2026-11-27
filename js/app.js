@@ -225,6 +225,7 @@ function itemStatus(order, item) {
   return { s: 'pending' };
 }
 function orderStatus(order) {
+  if (order.cancelled) return 'cancelled';
   const st = (order.items || []).map((it) => itemStatus(order, it).s);
   if (!st.length || st.every((s) => s === 'pending')) return 'pending';
   if (st.some((s) => s === 'pending')) return 'partial';
@@ -236,7 +237,7 @@ function orderStatus(order) {
 function countsByProduct(exceptOrderId = null) {
   const m = {};
   for (const o of S.cur.orders) {
-    if (o.id === exceptOrderId) continue;
+    if (o.id === exceptOrderId || o.cancelled) continue;
     for (const it of o.items || []) {
       if (itemStatus(o, it).s === 'rejected') continue;
       m[it.productId] = (m[it.productId] || 0) + (num(it.qty) || 1);
@@ -588,7 +589,7 @@ function productModal(pr) {
 
 // ===== 賣家：登記清單（審核＋欄位設定） =====
 function tabFields(p) {
-  const pendingN = S.cur.orders.filter((o) => ['pending', 'partial'].includes(orderStatus(o))).length;
+  const pendingN = S.cur.orders.filter((o) => ['pending', 'partial', 'cancelled'].includes(orderStatus(o))).length;
   const seg = `<div class="seg" role="tablist">
     <button class="${S.ui.fieldsSeg === 'review' ? 'active' : ''}" data-action="fields-seg" data-seg="review">審核登記${pendingN ? `（${pendingN}）` : ''}</button>
     <button class="${S.ui.fieldsSeg === 'config' ? 'active' : ''}" data-action="fields-seg" data-seg="config">登記欄位設定</button></div>`;
@@ -710,34 +711,88 @@ function reviewList(p) {
   const fields = fieldsOf(p);
   const f = S.ui.reviewFilter;
   let orders = [...S.cur.orders].sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0));
-  if (f === 'pending') orders = orders.filter((o) => ['pending', 'partial'].includes(orderStatus(o)));
-  if (f === 'done') orders = orders.filter((o) => !['pending', 'partial'].includes(orderStatus(o)));
+  const needs = (o) => ['pending', 'partial', 'cancelled'].includes(orderStatus(o));
+  if (f === 'pending') orders = orders.filter(needs);
+  if (f === 'done') orders = orders.filter((o) => !needs(o));
   const filt = [['pending', '待審核'], ['done', '已處理'], ['all', '全部']];
   const names = displayNames();
   return `<div class="row" style="margin-bottom:12px">${filt.map(([k, l]) => `<button class="btn sm ${f === k ? 'yellow' : ''}" data-action="review-filter" data-f="${k}">${l}</button>`).join('')}</div>
-  ${orders.length ? orders.map((o) => `<article class="card order">
-    <div class="row between"><div><b style="font-size:18px">${esc(names[o.id])}</b> <span class="muted small">・${o.items?.length || 0} 項・最後編輯 ${fmtTime(o.updatedAt)}</span>${orderExtras(p, o, false)}</div>
-      ${o.review?.order === 'rejected' ? `<span class="chip rejected">✕ 整筆拒絕</span>` : ''}</div>
+  ${orders.length ? orders.map((o) => reviewCard(p, o, names, fields)).join('') : `<div class="empty">${f === 'pending' ? '沒有待審核的登記 🎉' : '沒有資料'}</div>`}`;
+}
+// 一個欄位的值，轉成看得懂的文字（比對修改前後用）
+function valueText(p, f, values) {
+  const v = values?.[f.id];
+  if (f.type === 'amount') return fmtTWD(amountFor(p, f, values || {}));
+  if (f.type === 'select') { const pr = productById(v); return pr ? pr.name : (v ? '（商品已刪除）' : ''); }
+  return v ?? '';
+}
+// 和修改前比：哪些欄位變了
+function diffFields(p, fields, before, after) {
+  return fields.filter((f) => f.type !== 'amount').map((f) => {
+    const a = valueText(p, f, before.values), b = valueText(p, f, after.values);
+    return String(a) === String(b) ? '' : `<span class="diff"><span class="muted">${esc(f.label)}：</span><s>${esc(a || '（空白）')}</s> → <b>${esc(b || '（空白）')}</b></span>`;
+  }).join('');
+}
+const prevStatusText = (prevReview, item) => {
+  if (!prevReview) return '';
+  const st = itemStatus({ review: prevReview }, item);
+  return `<span class="muted small">原本：${st.s === 'rejected' ? `被拒絕${st.reason ? `（${esc(st.reason)}）` : ''}` : REVIEW[st.s]}</span>`;
+};
+function reviewCard(p, o, names, fields) {
+  const edited = Array.isArray(o.prevItems);
+  const prevMap = new Map((o.prevItems || []).map((it) => [it.id, it]));
+  const nowIds = new Set((o.items || []).map((it) => it.id));
+  const removed = (o.prevItems || []).filter((it) => !nowIds.has(it.id));
+  const oid = esc(o.id);
+  const head = `<div class="row between"><div><b style="font-size:18px">${esc(names[o.id])}</b> <span class="muted small">・${o.items?.length || 0} 項・最後編輯 ${fmtTime(o.updatedAt)}</span>${orderExtras(p, o, false)}</div>
+      ${o.review?.order === 'rejected' ? `<span class="chip rejected">✕ 整筆拒絕</span>` : ''}</div>`;
+
+  if (o.cancelled) {
+    return `<article class="card order cancelled-card">
+      ${head}
+      <div class="edit-note">🚫 客人在 ${fmtTime(o.cancelledAt || o.updatedAt)} <b>取消了這筆登記</b>，請確認</div>
+      <div class="order-items" style="margin-top:8px">${(o.items || []).map((it) => `<div>
+        <div class="row between" style="align-items:flex-start"><b class="struck">${esc(productNameOf(it))}</b>${prevStatusText(o.prevReview, it)}</div>
+        <div class="fields">${itemSummary(p, it, fields)}</div></div>`).join('')}</div>
+      <div class="row" style="border-top:var(--line) solid var(--ink);padding-top:10px;margin-top:4px">
+        <button class="btn sm primary" data-action="rv-delete" data-oid="${oid}">確認取消並刪除</button>
+      </div>
+      ${historyOf(p, o, names, fields)}
+    </article>`;
+  }
+
+  return `<article class="card order">
+    ${head}
+    ${edited ? `<div class="edit-note">✏️ 客人在 ${fmtTime(o.editedAt || o.updatedAt)} <b>修改過</b>這筆登記，請重新審核（下面標出修改前後的差異）</div>` : ''}
     ${o.review?.order === 'rejected' && o.review.orderReason ? `<div class="reason">整筆拒絕原因：${esc(o.review.orderReason)}</div>` : ''}
     <div class="order-items" style="margin-top:8px">${(o.items || []).map((it) => {
       const s = itemStatus(o, it);
+      const before = prevMap.get(it.id);
+      const tag = !edited ? '' : !before ? '<span class="chip tag-new">＋ 新增</span>' : diffFields(p, fields, before, it) ? '<span class="chip tag-edit">✏️ 有修改</span>' : '';
       return `<div>
-        <div class="row between" style="align-items:flex-start"><b>${itemName(it, s)}</b>${statusChip(s)}</div>
+        <div class="row between" style="align-items:flex-start"><b>${itemName(it, s)} ${tag}</b>${statusChip(s)}</div>
         <div class="fields">${itemSummary(p, it, fields)}</div>
+        ${before ? `<div class="fields">${diffFields(p, fields, before, it)}</div>${diffFields(p, fields, before, it) ? prevStatusText(o.prevReview, it) : ''}` : ''}
         <div class="row" style="margin-top:6px">
-          <button class="btn sm green" data-action="rv-item" data-oid="${esc(o.id)}" data-iid="${esc(it.id)}" data-s="approved">通過</button>
-          <button class="btn sm" data-action="rv-item" data-oid="${esc(o.id)}" data-iid="${esc(it.id)}" data-s="rejected">拒絕</button>
+          <button class="btn sm green" data-action="rv-item" data-oid="${oid}" data-iid="${esc(it.id)}" data-s="approved">通過</button>
+          <button class="btn sm" data-action="rv-item" data-oid="${oid}" data-iid="${esc(it.id)}" data-s="rejected">拒絕</button>
         </div></div>`;
-    }).join('')}</div>
+    }).join('')}
+    ${removed.map((it) => `<div class="removed-item">
+        <div class="row between" style="align-items:flex-start"><b class="struck">${esc(productNameOf(it))}</b><span class="chip tag-del">🗑 客人刪除</span></div>
+        <div class="fields">${itemSummary(p, it, fields)}</div>
+        ${prevStatusText(o.prevReview, it)}
+      </div>`).join('')}
+    </div>
     <div class="row" style="border-top:var(--line) solid var(--ink);padding-top:10px;margin-top:4px">
-      <button class="btn sm green" data-action="rv-order" data-oid="${esc(o.id)}" data-s="approved">整筆通過</button>
-      <button class="btn sm primary" data-action="rv-order" data-oid="${esc(o.id)}" data-s="rejected">整筆拒絕</button>
-      ${o.review ? `<button class="btn sm ghost" data-action="rv-reset" data-oid="${esc(o.id)}">重設為待審核</button>` : ''}
+      <button class="btn sm green" data-action="rv-order" data-oid="${oid}" data-s="approved">整筆通過</button>
+      <button class="btn sm primary" data-action="rv-order" data-oid="${oid}" data-s="rejected">整筆拒絕</button>
+      ${o.review ? `<button class="btn sm ghost" data-action="rv-reset" data-oid="${oid}">重設為待審核</button>` : ''}
       <span class="grow"></span>
-      <button class="btn sm ghost" data-action="rv-delete" data-oid="${esc(o.id)}">刪除</button>
+      <button class="btn sm ghost" data-action="rv-delete" data-oid="${oid}">刪除</button>
     </div>
     ${historyOf(p, o, names, fields)}
-  </article>`).join('') : `<div class="empty">${f === 'pending' ? '沒有待審核的登記 🎉' : '沒有資料'}</div>`}`;
+  </article>`;
 }
 
 // ===== 客人：登記表 =====
@@ -754,11 +809,11 @@ function tabForm(p) {
   return `${infoBlock(p)}
   <form id="reg-form" class="stack" style="margin-top:16px" novalidate>
     ${editing ? `<div class="edit-banner" role="alert">
-      <div><b>✏️ 你正在「修改」${fmtTime(editing.updatedAt)} 送出的舊登記</b><br><span class="small">送出後會<b>覆蓋</b>原本的內容，不是新增一筆。想新增請按「改成新增一筆」。</span></div>
+      <div><b>✏️ 你正在「修改」${fmtTime(editing.updatedAt)} 送出的舊登記</b><br><span class="small">送出後會<b>取代</b>原本的內容（不是新增一筆），並<b>回到待審核</b>，賣家會看到你改了什麼。想新增請按「改成新增一筆」。</span></div>
       <button type="button" class="btn sm" data-action="cancel-edit">改成新增一筆</button></div>` : ''}
     <div class="card stack">${orderFieldsOf(p).map((f) => orderInput(f, S.ui.orderValues[f.id] ?? '', !!editing)).join('')}${editing ? '<p class="small muted" style="margin:0">修改時不能改這些固定欄位，只能改下面的項目。</p>' : ''}</div>
     ${regTable(p, fields, counts)}
-    <button type="submit" class="btn primary block" style="min-height:52px;font-size:18px">${editing ? '覆蓋原本的登記' : '送出登記'}</button>
+    <button type="submit" class="btn primary block" style="min-height:52px;font-size:18px">${editing ? '送出修改（重新審核）' : '送出登記'}</button>
     <p class="small muted center" style="margin:0">送出後需等賣家審核，審核結果會顯示在「商品&登記總覽」。</p>
   </form>`;
 }
@@ -895,10 +950,16 @@ async function submitForm() {
       amount: amtF ? amountFor(p, amtF, row.values) : (pr ? twdOf(pr, p) : 0),
     };
   });
-  if (S.ui.editingOrder && !(await askConfirm('確定要覆蓋原本的登記嗎？原本的內容會被取代，無法復原。', '確定覆蓋'))) return;
+  if (S.ui.editingOrder && !(await askConfirm('確定要修改原本的登記嗎？送出後會回到「待審核」，等賣家重新確認。', '確定修改'))) return;
   const btn = $('#reg-form [type=submit]'); if (btn) btn.disabled = true;
   try {
-    if (S.ui.editingOrder) await S.store.updateOrder(p.id, S.ui.editingOrder, { items, updatedAt: now });
+    if (S.ui.editingOrder) {
+      const o = S.cur.orders.find((x) => x.id === S.ui.editingOrder);
+      const patch = { items, updatedAt: now, editedAt: now };
+      // 第一次修改（或審核完後再修改）才記下「修改前」；還沒審核又改第二次，就保留最早的版本
+      if (!Array.isArray(o.prevItems)) { patch.prevItems = o.items; patch.prevReview = o.review || null; }
+      await S.store.updateOrder(p.id, o.id, patch, o.review ? ['review'] : []);
+    }
     else await S.store.createOrder(p.id, { buyerName: name, orderValues, items, createdAt: now, updatedAt: now });
     const wasEdit = !!S.ui.editingOrder;
     if (wasEdit || !showSubmitPopup(p)) toast(wasEdit ? '已更新登記！' : '登記成功！等賣家審核喔');
@@ -914,35 +975,109 @@ function tabOverview(p) {
     <button class="${S.ui.overviewSeg === 'prod' ? 'active' : ''}" data-action="ov-seg" data-seg="prod">商品總覽</button></div>`;
   return seg + (S.ui.overviewSeg === 'prod' ? productOverview(p) : regOverview(p));
 }
+// 正取／備取：依「第一次送出的時間」先後分配名額（被拒絕、已取消的不算）
+function allocation() {
+  const t = (o) => o.createdAt || o.updatedAt || 0;
+  const used = {}, out = {}, mainNo = {}, waitNo = {};
+  S.cur.orders.filter((o) => !o.cancelled).sort((a, b) => t(a) - t(b)).forEach((o) => (o.items || []).forEach((it) => {
+    if (itemStatus(o, it).s === 'rejected') return;
+    const pr = productById(it.productId);
+    const q = num(it.qty) || 1;
+    const cap = pr ? num(pr.qty) : Infinity;
+    const u = used[it.productId] || 0;
+    const main = Math.max(0, Math.min(q, cap - u));
+    used[it.productId] = u + q;
+    const wait = q - main;
+    // 順序：這個商品的第幾位正取／第幾位備取
+    out[`${o.id}/${it.id}`] = {
+      main, wait,
+      mainRank: main ? (mainNo[it.productId] = (mainNo[it.productId] || 0) + 1) : 0,
+      waitRank: wait ? (waitNo[it.productId] = (waitNo[it.productId] || 0) + 1) : 0,
+    };
+  }));
+  return out;
+}
+// 數量：直接顯示登記的數量（正取／備取改看「順序」欄）
+function qtyCell(alloc, o, it, st) {
+  const q = num(it.qty) || 1;
+  return st.s === 'rejected' ? `<s class="muted">${q}</s>` : `<b>${q}</b>`;
+}
+function rankCell(alloc, o, it, st) {
+  if (st.s === 'rejected') return '<span class="muted">—</span>';
+  const a = alloc[`${o.id}/${it.id}`];
+  if (!a) return '';
+  return [a.mainRank ? `<span class="rank-main">正取第 ${a.mainRank} 位</span>` : '', a.waitRank ? `<span class="rank-wait">備取第 ${a.waitRank} 位</span>` : ''].filter(Boolean).join('<br>');
+}
+const OV_FILTERS = [['all', '全部'], ['pending', '待審核'], ['approved', '已通過'], ['rejected', '被拒絕']];
 function regOverview(p) {
   const fields = fieldsOf(p);
-  const rows = [];
-  for (const o of S.cur.orders) for (const it of o.items || []) rows.push({ o, it, st: itemStatus(o, it) });
+  const ms = mainSelect(fields), qf = qtyFieldOf(fields), amtF = fields.find((f) => f.type === 'amount');
+  const extraItemCols = fields.filter((f) => f !== ms && f !== qf && f.type !== 'amount');
+  const extraOrderCols = orderFieldsOf(p).filter((f) => f.id !== NAME_FIELD_ID && f.public);
+  const live = S.cur.orders.filter((o) => !o.cancelled);
+  const all = [];
+  for (const o of live) (o.items || []).forEach((it, idx) => all.push({ o, it, idx, st: itemStatus(o, it) }));
+  const filter = S.ui.ovFilter || 'all';
+  const rows = filter === 'all' ? all : all.filter((r) => r.st.s === filter);
   const [k, dir] = S.ui.sort.split('-');
   const sgn = dir === 'asc' ? 1 : -1;
   rows.sort((a, b) => k === 'name'
-    ? sgn * productNameOf(a.it).localeCompare(productNameOf(b.it), 'zh-Hant') || (a.o.updatedAt - b.o.updatedAt)
-    : sgn * ((a.o.updatedAt || 0) - (b.o.updatedAt || 0)));
-  const people = new Set(S.cur.orders.map((o) => personKey(o.buyerName))).size;
+    ? sgn * productNameOf(a.it).localeCompare(productNameOf(b.it), 'zh-Hant') || ((a.o.updatedAt || 0) - (b.o.updatedAt || 0))
+    : sgn * ((a.o.updatedAt || 0) - (b.o.updatedAt || 0)) || (a.idx - b.idx));
+  const people = new Set(live.map((o) => personKey(o.buyerName))).size;
   const names = displayNames();
+  const alloc = allocation();
   const myUid = S.user?.uid;
-  const canEdit = (o) => !isOwner() && p.status === 'open' && o.uid === myUid && !o.review;
+  const canEdit = (o) => !isOwner() && p.status === 'open' && o.uid === myUid && !o.cancelled;
+  const showAct = rows.some((r) => canEdit(r.o));
+  const count = (f) => (f === 'all' ? all.length : all.filter((r) => r.st.s === f).length);
   const sorts = [['time-asc', '時間：舊→新'], ['time-desc', '時間：新→舊'], ['name-asc', '商品名稱：A→Z'], ['name-desc', '商品名稱：Z→A']];
-  return `<div class="row between" style="margin-bottom:12px">
-      <span class="muted small">共 ${people} 人・${S.cur.orders.length} 筆・${rows.length} 項</span>
+
+  // 同一筆登記連在一起的列，登記人／日期等欄位合併成一格（像 Excel 的合併儲存格）
+  const runLen = new Map();
+  rows.forEach((r, i) => {
+    r.first = !(i && rows[i - 1].o.id === r.o.id);
+    r.run = r.first ? i : rows[i - 1].run;
+    runLen.set(r.run, (runLen.get(r.run) || 0) + 1);
+  });
+  let g = -1;
+  const body = rows.map((r) => {
+    const { o, it, st } = r;
+    if (r.first) g++;
+    const span = runLen.get(r.run);
+    const rs = span > 1 ? ` rowspan="${span}"` : '';
+    const pr = productById(it.productId);
+    const img = safeImg(pr?.image);
+    return `<tr class="${r.first ? 'grp' : ''} ${g % 2 ? 'g-odd' : ''} ${st.s === 'rejected' ? 'row-rej' : ''}">
+      ${r.first ? `<td class="sticky-col name-cell"${rs}><b>${esc(names[o.id])}</b>${span > 1 ? `<div class="muted small">${span} 項</div>` : ''}</td>` : ''}
+      ${r.first ? extraOrderCols.map((f) => `<td${rs}>${esc(o.orderValues?.[f.id] || '')}</td>`).join('') : ''}
+      <td><div class="ov-prod">${img ? `<button type="button" class="ov-thumb" data-action="zoom-img" data-src="${esc(img)}" data-name="${esc(pr.name)}" aria-label="放大看 ${esc(pr.name)}"><img src="${esc(img)}" alt=""></button>` : ''}${itemName(it, st)}</div></td>
+      <td class="nowrap qty">${qtyCell(alloc, o, it, st)}</td>
+      <td class="nowrap small">${rankCell(alloc, o, it, st)}</td>
+      ${amtF ? `<td class="num nowrap">${st.s === 'rejected' ? `<s class="muted">${fmtTWD(amountFor(p, amtF, it.values || {}))}</s>` : fmtTWD(amountFor(p, amtF, it.values || {}))}</td>` : ''}
+      ${extraItemCols.map((f) => `<td>${esc(valueText(p, f, it.values))}</td>`).join('')}
+      <td>${statusChip(st)}</td>
+      ${r.first ? `<td class="nowrap muted small"${rs}>${fmtTime(o.updatedAt)}</td>` : ''}
+      ${showAct && r.first ? `<td class="nowrap"${rs}>${canEdit(o) ? `<button class="btn sm" data-action="edit-order" data-oid="${esc(o.id)}">修改</button> <button class="btn sm ghost" data-action="cancel-order" data-oid="${esc(o.id)}">取消</button>` : ''}</td>` : ''}
+    </tr>`;
+  }).join('');
+
+  return `<div class="row between" style="margin-bottom:10px">
+      <span class="muted small">共 ${people} 人・${live.length} 筆・${all.length} 項</span>
       <select class="in" style="width:auto;min-height:40px" data-change="sort" aria-label="排序">${sorts.map(([v, l]) => `<option value="${v}" ${S.ui.sort === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
     </div>
-    ${k === 'time' && rows.length ? groupedByOrder(p, fields, sgn, canEdit) : rows.length ? rows.map(({ o, it, st }) => `<article class="card reg">
-      <div class="row between">
-        <div class="grow"><b>${esc(names[o.id])}</b> <span class="muted">・</span> ${itemName(it, st)}</div>
-        ${statusChip(st)}
-      </div>
-      <div class="fields">${itemSummary(p, it, fields)}</div>
-      <div class="row between" style="margin-top:4px">
-        <span class="muted small">最後編輯 ${fmtTime(o.updatedAt)}</span>
-        ${canEdit(o) ? `<span class="row"><button class="btn sm" data-action="edit-order" data-oid="${esc(o.id)}">修改</button><button class="btn sm ghost" data-action="cancel-order" data-oid="${esc(o.id)}">取消登記</button></span>` : ''}
-      </div>
-    </article>`).join('') : '<div class="empty">還沒有人登記</div>'}`;
+    <div class="row" style="margin-bottom:12px" role="group" aria-label="依審核狀態篩選">
+      ${OV_FILTERS.map(([v, l]) => `<button class="btn sm ${filter === v ? 'yellow' : ''}" data-action="ov-filter" data-f="${v}">${l}（${count(v)}）</button>`).join('')}
+    </div>
+    ${rows.length ? `<div class="ov-wrap"><table class="ov-table">
+      <thead><tr>
+        <th class="sticky-col">登記人</th>
+        ${extraOrderCols.map((f) => `<th>${esc(f.label)}</th>`).join('')}
+        <th>商品</th><th class="qty">${esc(qf?.label || '數量')}</th><th>順序</th>${amtF ? `<th>${esc(amtF.label)}</th>` : ''}
+        ${extraItemCols.map((f) => `<th>${esc(f.label)}</th>`).join('')}
+        <th>狀態</th><th>最後編輯</th>${showAct ? '<th></th>' : ''}
+      </tr></thead>
+      <tbody>${body}</tbody></table></div>` : `<div class="empty">${filter === 'all' ? '還沒有人登記' : '沒有符合的登記'}</div>`}`;
 }
 // 同一個登記人（名字相同）的多次登記，合併在同一張卡片
 // 同名的人第 2 次以後送出的登記，顯示成「名字_2」「名字_3」…
@@ -956,24 +1091,6 @@ function displayNames() {
   return out;
 }
 const personKey = (name) => String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
-function groupedByOrder(p, fields, sgn, canEdit) {
-  const names = displayNames();
-  const orders = [...S.cur.orders].sort((a, b) => sgn * ((a.updatedAt || 0) - (b.updatedAt || 0)));
-  return orders.map((o) => `<article class="card reg">
-      <div class="row between"><b style="font-size:18px">${esc(names[o.id])}</b><span class="muted small">共 ${o.items?.length || 0} 項</span></div>
-      ${orderExtras(p, o, true)}
-      <div class="order-items" style="margin-top:6px">
-        ${(o.items || []).map((it) => { const st = itemStatus(o, it); return `<div style="padding:6px 0 2px">
-          <div class="row between" style="align-items:flex-start"><span class="grow">${itemName(it, st)}</span>${statusChip(st)}</div>
-          <div class="fields" style="margin-top:0">${itemSummary(p, it, fields)}</div>
-        </div>`; }).join('')}
-      </div>
-      <div class="row between small muted" style="border-top:2px dashed rgba(62,58,57,.3);padding-top:6px;margin-top:4px">
-        <span>最後編輯 ${fmtTime(o.updatedAt)}</span>
-        ${canEdit(o) ? `<span class="row"><button class="btn sm" data-action="edit-order" data-oid="${esc(o.id)}">修改</button><button class="btn sm ghost" data-action="cancel-order" data-oid="${esc(o.id)}">取消登記</button></span>` : ''}
-      </div>
-    </article>`).join('');
-}
 function productOverview(p) {
   const counts = countsByProduct();
   const list = sortedProducts();
@@ -1187,12 +1304,13 @@ const actions = {
     }
     r.items[el.dataset.iid] = el.dataset.s === 'rejected' ? { status: 'rejected', reason: reason.trim() } : { status: 'approved' };
     r.at = Date.now();
-    await S.store.setReview(S.cur.pid, o.id, r);
+    const done = (o.items || []).every((it) => itemStatus({ review: r }, it).s !== 'pending');
+    await S.store.setReview(S.cur.pid, o.id, r, done);
   },
   async 'rv-order'(el) {
     let reason = '';
     if (el.dataset.s === 'rejected') { reason = await askText('整筆不通過的原因（客人看得到）', { placeholder: '例如：未依規定付款…', okText: '確定拒絕' }); if (reason === null) return; }
-    await S.store.setReview(S.cur.pid, el.dataset.oid, { order: el.dataset.s, orderReason: reason.trim(), items: {}, at: Date.now() });
+    await S.store.setReview(S.cur.pid, el.dataset.oid, { order: el.dataset.s, orderReason: reason.trim(), items: {}, at: Date.now() }, true);
     toast(el.dataset.s === 'approved' ? '整筆通過 ✓' : '已整筆拒絕');
   },
   async 'rv-reset'(el) { await S.store.clearReview(S.cur.pid, el.dataset.oid); },
@@ -1207,8 +1325,14 @@ const actions = {
   'edit-order': (el) => { S.ui.editingOrder = el.dataset.oid; S.ui.rows = null; go(`#/p/${S.cur.pid}/form`); },
   async 'cancel-order'(el) {
     if (!(await askConfirm('確定取消這筆登記？', '取消登記'))) return;
-    await S.store.deleteOrder(S.cur.pid, el.dataset.oid); toast('已取消');
+    const o = S.cur.orders.find((x) => x.id === el.dataset.oid);
+    const now = Date.now();
+    const patch = { cancelled: true, cancelledAt: now, updatedAt: now };
+    if (!Array.isArray(o.prevItems)) { patch.prevItems = o.items; patch.prevReview = o.review || null; }
+    await S.store.updateOrder(S.cur.pid, o.id, patch, o.review ? ['review'] : []);
+    toast('已取消，賣家會收到通知');
   },
+  'ov-filter': (el) => { S.ui.ovFilter = el.dataset.f; render(true); },
   'ov-seg': (el) => { S.ui.overviewSeg = el.dataset.seg; render(true); },
 
   'zoom-img': (el) => openModal(`<h2>${esc(el.dataset.name)}</h2>

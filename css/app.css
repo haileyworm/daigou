@@ -248,3 +248,41 @@ button.rt-thumb { cursor: zoom-in; }
 .rt-thumb img { width: 100%; height: 100%; object-fit: cover; }
 .rt-row .rt-no { height: 52px; }
 .edit-banner { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; background: var(--coral); border: var(--line) solid var(--ink); border-radius: var(--r-md); padding: 10px 14px; box-shadow: var(--shadow-sm); }
+
+/* 審核：修改前後差異 */
+.edit-note { margin-top: 8px; background: var(--yellow); border: 2px solid var(--ink); border-radius: var(--r-sm); padding: 6px 10px; font-size: 14px; }
+.diff { background: var(--paper-2); border-radius: 6px; padding: 0 6px; }
+.diff s { color: var(--ink-soft); }
+.chip.tag-new { background: var(--green); font-size: 12px; height: 22px; vertical-align: middle; }
+.chip.tag-edit { background: var(--yellow); font-size: 12px; height: 22px; vertical-align: middle; }
+.chip.tag-del { background: var(--lock); }
+.removed-item { background: var(--paper-2); border-radius: var(--r-sm); padding: 6px 8px !important; margin-top: 6px; }
+.cancelled-card { background: var(--paper-2); }
+
+/* ============ 登記總覽：像 Excel 的表格 ============ */
+.ov-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border: var(--line) solid var(--ink); border-radius: var(--r-md); box-shadow: var(--shadow); background: var(--paper); }
+.ov-table { border-collapse: separate; border-spacing: 0; width: 100%; min-width: 640px; font-size: 15px; }
+.ov-table th { background: var(--water); text-align: left; font-weight: 700; padding: 8px 10px; border-bottom: var(--line) solid var(--ink); white-space: nowrap; position: sticky; top: 0; }
+.ov-table td { padding: 7px 10px; border-bottom: 1px solid rgba(62,58,57,.18); vertical-align: middle; background: var(--paper); }
+.ov-table tr.grp td { border-top: 2px solid rgba(62,58,57,.45); }
+.ov-table tbody tr:first-child td { border-top: 0; }
+.ov-table tr.g-odd td { background: #FBF6EC; }
+.ov-table tr.row-rej td { background: var(--coral-pale) !important; }
+.ov-table .sticky-col { white-space: nowrap; position: sticky; left: 0; z-index: 1; border-right: 2px solid rgba(62,58,57,.25); }
+.ov-table th.sticky-col { z-index: 2; }
+.ov-table .num { text-align: right; }
+.ov-table .nowrap { white-space: nowrap; }
+.ov-table .chip-wrap { max-width: 220px; }
+.ov-prod { display: flex; align-items: center; gap: 8px; min-width: 160px; }
+.ov-thumb { flex: none; width: 34px; height: 34px; padding: 0; border: 2px solid var(--ink); border-radius: 8px; overflow: hidden; background: var(--paper-2); cursor: zoom-in; }
+.ov-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.q-main, .q-wait { display: inline-block; border: 2px solid var(--ink); border-radius: 99px; padding: 0 8px; font-size: 13px; font-weight: 700; line-height: 22px; }
+.q-main { background: var(--green); }
+.q-wait { background: var(--yellow); }
+
+.ov-table td.name-cell { vertical-align: top; padding-top: 10px; border-bottom: 2px solid rgba(62,58,57,.45); }
+.ov-table td[rowspan] { border-bottom: 2px solid rgba(62,58,57,.45); vertical-align: top; padding-top: 10px; }
+.rank-main, .rank-wait { font-weight: 700; }
+.rank-main { color: #4E7F3B; }
+.rank-wait { color: #A2731A; }
+.ov-table td.qty, .ov-table th.qty { text-align: center; }

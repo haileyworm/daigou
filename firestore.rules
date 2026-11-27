@@ -49,19 +49,20 @@ service cloud.firestore {
           && request.resource.data.uid == request.auth.uid
           && validOrder(request.resource.data));
 
-        // 客人修改自己的登記：還沒被審核前才可以，只能改項目、時間
+        // 客人修改／取消自己的登記（審核過也可以）：
+        //  - 不能改名字、不能自己填審核結果，只能把審核清掉（回到待審核）
+        //  - 會留下「修改前」的資料給賣家比對
         // 賣家可以改任何東西（審核）
         allow update: if isOwner() || (signedIn()
           && guestCanRegister(pid)
           && resource.data.uid == request.auth.uid
-          && !('review' in resource.data)
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['buyerName', 'items', 'updatedAt'])
+          && request.resource.data.uid == resource.data.uid
+          && request.resource.data.buyerName == resource.data.buyerName
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['items', 'updatedAt', 'editedAt', 'prevItems', 'prevReview', 'review', 'cancelled', 'cancelledAt'])
           && validOrder(request.resource.data));
 
-        allow delete: if isOwner() || (signedIn()
-          && guestCanRegister(pid)
-          && resource.data.uid == request.auth.uid
-          && !('review' in resource.data));
+        // 只有賣家可以真的刪除（客人「取消登記」只是標記為已取消）
+        allow delete: if isOwner();
       }
     }
   }

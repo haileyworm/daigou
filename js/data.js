@@ -43,9 +43,9 @@ function makeLocal() {
     async saveProduct(pid, id, data) { id = id || uid8(); P(pid).products[id] = { ...data, id }; save(); return id; },
     async deleteProduct(pid, id) { delete P(pid).products[id]; save(); },
     async createOrder(pid, data) { const id = uid8(); P(pid).orders[id] = { ...data, id, uid: user.uid }; save(); return id; },
-    async updateOrder(pid, oid, patch) { Object.assign(P(pid).orders[oid], patch); save(); },
+    async updateOrder(pid, oid, patch, delKeys = []) { const o = P(pid).orders[oid]; Object.assign(o, patch); delKeys.forEach((k) => delete o[k]); save(); },
     async deleteOrder(pid, oid) { delete P(pid).orders[oid]; save(); },
-    async setReview(pid, oid, review) { P(pid).orders[oid].review = review; save(); },
+    async setReview(pid, oid, review, clearPrev = false) { const o = P(pid).orders[oid]; o.review = review; if (clearPrev) { delete o.prevItems; delete o.prevReview; delete o.editedAt; } save(); },
     async clearReview(pid, oid) { delete P(pid).orders[oid].review; save(); },
   };
 }
@@ -120,9 +120,12 @@ async function makeFirebase() {
     },
     deleteProduct: (pid, id) => wrap(deleteDoc(doc(db, 'projects', pid, 'products', id))),
     createOrder: (pid, data) => wrap(addDoc(collection(db, 'projects', pid, 'orders'), { ...data, uid: auth.currentUser.uid }).then((r) => r.id)),
-    updateOrder: (pid, oid, patch) => wrap(updateDoc(doc(db, 'projects', pid, 'orders', oid), patch)),
+    updateOrder: (pid, oid, patch, delKeys = []) => wrap(updateDoc(doc(db, 'projects', pid, 'orders', oid),
+      { ...patch, ...Object.fromEntries(delKeys.map((k) => [k, deleteField()])) })),
     deleteOrder: (pid, oid) => wrap(deleteDoc(doc(db, 'projects', pid, 'orders', oid))),
-    setReview: (pid, oid, review) => wrap(updateDoc(doc(db, 'projects', pid, 'orders', oid), { review })),
+    // clearPrev：審核完成後，清掉「修改前」的紀錄
+    setReview: (pid, oid, review, clearPrev = false) => wrap(updateDoc(doc(db, 'projects', pid, 'orders', oid),
+      clearPrev ? { review, prevItems: deleteField(), prevReview: deleteField(), editedAt: deleteField() } : { review })),
     clearReview: (pid, oid) => wrap(updateDoc(doc(db, 'projects', pid, 'orders', oid), { review: deleteField() })),
   };
 }
