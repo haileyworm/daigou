@@ -15,7 +15,7 @@ export const OWNER_EMAIL = 'hailey214h@gmail.com';
 
 // 從 Firebase 主控台「專案設定 → 你的應用程式」複製過來貼上。
 // 保持 YOUR_ 開頭的話，網站會用「示範模式」（資料只存在這台裝置的瀏覽器）。
-const FIREBASE_CONFIG = {
+export const FIREBASE_CONFIG = {
   apiKey: "AIzaSyCSwVwFdlAS4tNrkzikosP3ok8bHTcMyoQ",
   authDomain: "buybuy-87281.firebaseapp.com",
   projectId: "buybuy-87281",
