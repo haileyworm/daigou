@@ -59,7 +59,11 @@ const STATUS = {
   view: { label: '純檢視中', cls: 'view', desc: '只能看，不能登記' },
   locked: { label: '已結束・鎖定', cls: 'locked', desc: '已結單，卡片無法點進去' },
 };
-const REVIEW = { pending: '待審核', approved: '已通過', rejected: '未通過' };
+const REVIEW = { pending: '待審核', approved: '已通過', rejected: '被拒絕' };
+const statusChip = (st) => st.s === 'rejected'
+  ? `<span class="chip rejected chip-wrap">✕ 被拒絕${st.reason ? `；${esc(st.reason)}` : ''}</span>`
+  : `<span class="chip ${st.s}">${REVIEW[st.s]}</span>`;
+const itemName = (it, st) => `<span class="${st.s === 'rejected' ? 'struck' : ''}">${esc(productNameOf(it))}</span>`;
 
 function toast(msg) {
   document.querySelectorAll('.toast').forEach((t) => t.remove());
@@ -129,9 +133,9 @@ setErrorHandler(handleError);
 //  彈出視窗
 // ------------------------------------------------------------
 let modalResolve = null;
-function openModal(html) {
-  layer.innerHTML = `<div class="modal-bg" data-action="modal-bg"><div class="modal" role="dialog" aria-modal="true">${html}</div></div>`;
-  const first = $('.modal input, .modal textarea, .modal select', layer);
+function openModal(html, { noBgClose = false } = {}) {
+  layer.innerHTML = `<div class="modal-bg" ${noBgClose ? '' : 'data-action="modal-bg"'}><div class="modal" role="dialog" aria-modal="true">${html}</div></div>`;
+  const first = $('.modal [autofocus]', layer) || $('.modal input, .modal textarea, .modal select', layer);
   if (first) setTimeout(() => first.focus(), 50);
 }
 function closeModal(val = null) {
@@ -244,7 +248,9 @@ function countsByProduct(exceptOrderId = null) {
 function stockInfo(product, counts) {
   const used = counts[product.id] || 0;
   const qty = num(product.qty);
-  const wl = num(product.waitlistMax);
+  // 候補最高總數：空白＝不限，填 0＝不開放候補
+  const wlRaw = product.waitlistMax;
+  const wl = (wlRaw === null || wlRaw === undefined || wlRaw === '') ? Infinity : num(wlRaw);
   return {
     used, qty, wl,
     left: Math.max(0, qty - used),
@@ -420,7 +426,7 @@ function infoBlock(p) {
   const [code, cname] = cur(p.currency || 'JPY');
   return `<section class="card stack">
     ${p.description ? `<p style="margin:0;white-space:pre-wrap">${esc(p.description)}</p>` : ''}
-    <div class="calc small">💱 匯率：1 ${code}（${cname}）＝ NT$ ${fmtNum(p.rate, 4)}</div>
+    <div class="calc small">💱 ${cname} → 台幣：${fmtNum(p.rate, 4)}</div>
   </section>`;
 }
 
@@ -447,6 +453,19 @@ function tabProducts(p) {
         ${cover.type === 'image' ? '<span class="chip approved">目前使用上傳圖片</span>' : ''}
       </div>
     </div>
+    <div class="field-cfg stack">
+      <div class="small" style="font-weight:700">📣 客人送出登記後的提示視窗（全部空白就不跳）</div>
+      <label class="f"><span>說明文字</span><textarea class="in" id="pj-pop-text" placeholder="例如：登記完成！請加入 LINE 群組，之後會在群組通知下單與付款～">${esc(p.popup?.text)}</textarea></label>
+      <label class="f"><span>LINE 群組邀請連結（非必填）</span><input class="in" id="pj-pop-link" inputmode="url" placeholder="https://line.me/R/ti/g/…" value="${esc(p.popup?.link)}"></label>
+      <div class="row">
+        <div class="thumb">${safeImg(p.popup?.qr) ? `<img src="${esc(p.popup.qr)}" alt="QR code" style="object-fit:contain;background:#fff">` : '<span class="small muted">QR</span>'}</div>
+        <div class="stack grow">
+          <div class="row"><button class="btn sm" data-action="qr-upload">📷 上傳 QR Code</button><button class="btn sm" data-action="qr-paste">📋 貼上</button></div>
+          ${p.popup?.qr ? '<button class="btn sm ghost" data-action="qr-clear">移除 QR Code</button>' : ''}
+        </div>
+      </div>
+      <button class="btn sm water" data-action="popup-preview">👀 預覽提示視窗</button>
+    </div>
     <div class="row between">
       <button class="btn sm ghost" data-action="copy-link">🔗 複製分享連結</button>
       <button class="btn primary" data-action="save-project">儲存設定</button>
@@ -462,7 +481,7 @@ function tabProducts(p) {
       <div class="stack" style="min-width:0">
         <div><h4>${esc(pr.name)}</h4>
           <div class="price">${fmtTWD(twdOf(pr, p))} <span class="muted small">（${fmtFX(pr.foreignPrice, code)}）</span></div></div>
-        <div class="kv"><span>可登記 <b>${s.qty}</b></span><span>候補上限 <b>${pr.waitlistMax ? s.wl : '—'}</b></span><span>已登記 <b>${s.used}</b></span></div>
+        <div class="kv"><span>可登記 <b>${s.qty}</b></span><span>候補上限 <b>${wlText(s.wl)}</b></span><span>已登記 <b>${s.used}</b></span></div>
         <div class="row">
           <button class="btn sm" data-action="edit-product" data-id="${esc(pr.id)}">編輯</button>
           <button class="btn sm ghost icon-btn" data-action="move-product" data-id="${esc(pr.id)}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="往上">↑</button>
@@ -508,6 +527,32 @@ document.addEventListener('drop', async (e) => {
   e.preventDefault();
   if (!(await imageFromTransfer(e.dataTransfer))) toast('請拖曳圖片檔');
 });
+const popupLinkInput = () => { const v = $('#pj-pop-link')?.value.trim() || ''; return /^https:\/\//.test(v) ? v : ''; };
+async function clipboardImage() {
+  if (!navigator.clipboard?.read) { toast('這個瀏覽器不支援按鈕貼上，請改用上傳'); return null; }
+  try {
+    for (const item of await navigator.clipboard.read()) {
+      const t = item.types.find((x) => x.startsWith('image/'));
+      if (t) return await fileToDataURL(await item.getType(t), 700);
+    }
+    toast('剪貼簿裡沒有圖片');
+  } catch { toast('沒有權限讀取剪貼簿，請改用上傳'); }
+  return null;
+}
+// 客人送出後跳出的提示視窗（不能點背景關，要按按鈕）
+function showSubmitPopup(p, preview = false) {
+  const pop = p.popup || {};
+  if (!preview && !pop.text && !pop.qr && !pop.link) return false;
+  openModal(`<div class="stack center">
+      <div style="font-size:40px;line-height:1" aria-hidden="true">🎉</div>
+      <h2 style="margin:0">${preview ? '（預覽）' : ''}登記送出囉！</h2>
+      ${pop.text ? `<p style="margin:0;white-space:pre-wrap;text-align:left">${esc(pop.text)}</p>` : ''}
+      ${safeImg(pop.qr) ? `<img src="${esc(pop.qr)}" alt="LINE 群組 QR Code" style="width:min(240px,70vw);margin:0 auto;border:var(--line) solid var(--ink);border-radius:var(--r-md);background:#fff">` : ''}
+      ${pop.link ? `<a class="btn green block" href="${esc(pop.link)}" target="_blank" rel="noopener">💬 加入 LINE 群組</a>` : ''}
+      <button class="btn primary block" data-action="modal-cancel">我知道了</button>
+    </div>`, { noBgClose: true });
+  return true;
+}
 function productModal(pr) {
   const p = S.cur.project;
   const code = p.currency || 'JPY';
@@ -523,10 +568,10 @@ function productModal(pr) {
           <button class="btn sm ghost" data-action="pm-clear-img">移除圖片</button>
         </div>
       </div>
-      <label class="f"><span>商品名稱 <b class="req">*</b></span><input class="in" id="pm-name" value="${esc(pr?.name)}" maxlength="80"></label>
+      <label class="f"><span>商品名稱 <b class="req">*</b></span><input class="in" id="pm-name" value="${esc(pr?.name)}" maxlength="80" autofocus></label>
       <div class="f-grid">
         <label class="f"><span>可登記數量 <b class="req">*</b></span><input class="in" id="pm-qty" type="number" min="0" inputmode="numeric" value="${esc(pr?.qty ?? 1)}"></label>
-        <label class="f"><span>候補最高總數</span><input class="in" id="pm-wl" type="number" min="0" inputmode="numeric" placeholder="非必填" value="${esc(pr?.waitlistMax || '')}"></label>
+        <label class="f"><span>候補最高總數</span><input class="in" id="pm-wl" type="number" min="0" inputmode="numeric" placeholder="空白＝不限" value="${esc(pr ? (pr.waitlistMax ?? '') : '')}"></label>
         <label class="f"><span>外幣金額（${code}） <b class="req">*</b></span><input class="in" id="pm-fx" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(pr?.foreignPrice ?? '')}" data-input="pm-fx"></label>
         <label class="f"><span>台幣金額（自動）</span><input class="in" id="pm-twd" readonly value="${pr ? fmtTWD(twdOf(pr, p)) : ''}"></label>
       </div>
@@ -643,6 +688,21 @@ function orderExtras(p, o, onlyPublic) {
     .map((f) => { const v = o.orderValues?.[f.id]; return v ? `<span><span class="muted">${esc(f.label)}：</span>${esc(v)}</span>` : ''; }).join('');
   return html ? `<div class="fields">${html}</div>` : '';
 }
+// 審核時：同一個人（名字相同）之前送出的登記
+function historyOf(p, o, names, fields) {
+  const key = personKey(o.buyerName);
+  const t = (x) => x.createdAt || x.updatedAt || 0;
+  const prev = S.cur.orders.filter((x) => x.id !== o.id && personKey(x.buyerName) === key && t(x) < t(o)).sort((a, b) => t(a) - t(b));
+  if (!prev.length) return '';
+  return `<details class="history">
+    <summary>📜 ${esc(String(o.buyerName).trim())} 之前的登記（${prev.length} 筆）</summary>
+    ${prev.map((x) => `<div class="history-order">
+      <div class="small muted"><b style="color:var(--ink)">${esc(names[x.id])}</b>・${fmtTime(t(x))} 送出${orderExtras(p, x, false)}</div>
+      ${(x.items || []).map((it) => { const st = itemStatus(x, it); return `<div class="row between" style="align-items:flex-start;margin-top:4px">
+        <div class="grow">${itemName(it, st)}<div class="fields" style="margin-top:0">${itemSummary(p, it, fields)}</div></div>${statusChip(st)}</div>`; }).join('')}
+    </div>`).join('')}
+  </details>`;
+}
 function reviewList(p) {
   const fields = fieldsOf(p);
   const f = S.ui.reviewFilter;
@@ -650,18 +710,17 @@ function reviewList(p) {
   if (f === 'pending') orders = orders.filter((o) => ['pending', 'partial'].includes(orderStatus(o)));
   if (f === 'done') orders = orders.filter((o) => !['pending', 'partial'].includes(orderStatus(o)));
   const filt = [['pending', '待審核'], ['done', '已處理'], ['all', '全部']];
+  const names = displayNames();
   return `<div class="row" style="margin-bottom:12px">${filt.map(([k, l]) => `<button class="btn sm ${f === k ? 'yellow' : ''}" data-action="review-filter" data-f="${k}">${l}</button>`).join('')}</div>
   ${orders.length ? orders.map((o) => `<article class="card order">
-    <div class="row between"><div><b style="font-size:18px">${esc(o.buyerName)}</b> <span class="muted small">・${o.items?.length || 0} 項・最後編輯 ${fmtTime(o.updatedAt)}</span>${orderExtras(p, o, false)}</div>
-      ${o.review?.order === 'rejected' ? `<span class="chip rejected">整筆未通過</span>` : ''}</div>
-    ${o.review?.order === 'rejected' && o.review.orderReason ? `<div class="reason">原因：${esc(o.review.orderReason)}</div>` : ''}
+    <div class="row between"><div><b style="font-size:18px">${esc(names[o.id])}</b> <span class="muted small">・${o.items?.length || 0} 項・最後編輯 ${fmtTime(o.updatedAt)}</span>${orderExtras(p, o, false)}</div>
+      ${o.review?.order === 'rejected' ? `<span class="chip rejected">✕ 整筆拒絕</span>` : ''}</div>
+    ${o.review?.order === 'rejected' && o.review.orderReason ? `<div class="reason">整筆拒絕原因：${esc(o.review.orderReason)}</div>` : ''}
     <div class="order-items" style="margin-top:8px">${(o.items || []).map((it) => {
       const s = itemStatus(o, it);
       return `<div>
-        <div class="row between"><b>${esc(productNameOf(it))}</b><span class="chip ${s.s}">${REVIEW[s.s]}</span></div>
-        ${orderExtras(p, o, true)}
-      <div class="fields">${itemSummary(p, it, fields)}</div>
-        ${s.s === 'rejected' && s.reason && o.review?.order !== 'rejected' ? `<div class="reason">原因：${esc(s.reason)}</div>` : ''}
+        <div class="row between" style="align-items:flex-start"><b>${itemName(it, s)}</b>${statusChip(s)}</div>
+        <div class="fields">${itemSummary(p, it, fields)}</div>
         <div class="row" style="margin-top:6px">
           <button class="btn sm green" data-action="rv-item" data-oid="${esc(o.id)}" data-iid="${esc(it.id)}" data-s="approved">通過</button>
           <button class="btn sm" data-action="rv-item" data-oid="${esc(o.id)}" data-iid="${esc(it.id)}" data-s="rejected">拒絕</button>
@@ -674,6 +733,7 @@ function reviewList(p) {
       <span class="grow"></span>
       <button class="btn sm ghost" data-action="rv-delete" data-oid="${esc(o.id)}">刪除</button>
     </div>
+    ${historyOf(p, o, names, fields)}
   </article>`).join('') : `<div class="empty">${f === 'pending' ? '沒有待審核的登記 🎉' : '沒有資料'}</div>`}`;
 }
 
@@ -684,7 +744,7 @@ function tabForm(p) {
   const editing = S.ui.editingOrder ? S.cur.orders.find((o) => o.id === S.ui.editingOrder) : null;
   if (!S.ui.rows) {
     S.ui.rows = editing ? editing.items.map((it) => ({ id: it.id, values: { ...it.values } })) : [{ id: newId(), values: {} }];
-    S.ui.orderValues = editing ? { ...(editing.orderValues || {}), [NAME_FIELD_ID]: editing.buyerName } : { [NAME_FIELD_ID]: localStorage.getItem('daigou-name') || '' };
+    S.ui.orderValues = editing ? { ...(editing.orderValues || {}), [NAME_FIELD_ID]: editing.buyerName } : { [NAME_FIELD_ID]: '' };
   }
   if (!S.cur.products.length) return `${infoBlock(p)}<div class="empty" style="margin-top:16px">賣家還沒放商品喔，晚點再來看看～</div>`;
   const counts = countsByProduct(editing?.id);
@@ -692,8 +752,7 @@ function tabForm(p) {
   <form id="reg-form" class="stack" style="margin-top:16px" novalidate>
     ${editing ? `<div class="demo-banner">✏️ 正在修改你 ${fmtTime(editing.updatedAt)} 的登記 <button type="button" class="btn sm" data-action="cancel-edit">取消修改</button></div>` : ''}
     <div class="card stack">${orderFieldsOf(p).map((f) => orderInput(f, S.ui.orderValues[f.id] ?? '', !!editing)).join('')}${editing ? '<p class="small muted" style="margin:0">修改時不能改這些固定欄位，只能改下面的項目。</p>' : ''}</div>
-    <div id="rows" style="padding-top:8px">${S.ui.rows.map((row, i) => formRow(p, fields, row, i, counts)).join('')}</div>
-    <button type="button" class="btn block" data-action="add-row">＋ 再登記一項</button>
+    ${regTable(p, fields, counts)}
     <button type="submit" class="btn primary block" style="min-height:52px;font-size:18px">${editing ? '儲存修改' : '送出登記'}</button>
     <p class="small muted center" style="margin:0">送出後需等賣家審核，審核結果會顯示在「商品&登記總覽」。</p>
   </form>`;
@@ -705,38 +764,57 @@ function orderInput(f, v, ro = false) {
   const extra = f.id === NAME_FIELD_ID ? 'maxlength="40" autocomplete="nickname"' : 'maxlength="200"';
   return `<label class="f">${label}<input class="in" name="o:${esc(f.id)}" ${type} value="${esc(v)}" ${extra} ${req ? 'required' : ''} ${ro ? 'readonly' : ''}></label>`;
 }
-function formRow(p, fields, row, i, counts) {
-  const ms = mainSelect(fields);
-  const prods = sortedProducts();
-  const inner = fields.map((f) => {
-    const v = row.values[f.id] ?? '';
-    const req = f.required && f.type !== 'amount';
-    const label = `<span>${esc(f.label)}${req ? ' <b class="req">*</b>' : ''}</span>`;
-    const nm = `name="f:${esc(f.id)}"`;
-    if (f.type === 'select') {
-      return `<label class="f">${label}<select class="in" ${nm} data-change="row-calc" ${req ? 'required' : ''}>
-        <option value="">請選擇</option>
-        ${prods.map((pr) => { const s = stockInfo(pr, counts); const dis = s.full && v !== pr.id; return `<option value="${esc(pr.id)}" ${v === pr.id ? 'selected' : ''} ${dis ? 'disabled' : ''}>${esc(selectText(f, pr, p))}${s.full ? '（已額滿）' : s.left === 0 ? '（候補）' : ''}</option>`; }).join('')}
-      </select>${ms && f.id === ms.id ? `<small class="muted stock-hint">${stockHint(productById(v), counts)}</small>` : ''}</label>`;
-    }
-    if (f.type === 'amount') return `<label class="f">${label}<input class="in" readonly data-amount="${esc(f.id)}" value="${fmtTWD(amountFor(p, f, row.values))}" tabindex="-1"></label>`;
-    if (f.type === 'number') return `<label class="f">${label}<input class="in" type="number" min="1" step="1" inputmode="numeric" ${nm} value="${esc(v || (req ? 1 : ''))}" data-input="row-calc" ${req ? 'required' : ''}></label>`;
-    if (f.type === 'date') return `<label class="f">${label}<input class="in" type="date" ${nm} value="${esc(v)}" ${req ? 'required' : ''}></label>`;
-    return `<label class="f">${label}<input class="in" ${nm} value="${esc(v)}" maxlength="200" ${req ? 'required' : ''}></label>`;
-  }).join('');
-  return `<div class="item-row stack" data-row="${esc(row.id)}">
-    <span class="no">第 ${i + 1} 項</span>
-    ${S.ui.rows.length > 1 ? `<button type="button" class="btn sm ghost icon-btn" style="position:absolute;top:6px;right:6px" data-action="del-row" data-row="${esc(row.id)}" aria-label="移除這一項">✕</button>` : ''}
-    <div style="height:4px"></div>
-    ${inner}
+// 橫式登記表：每一項一列，欄位名稱只在最上面出現一次
+const COL_W = { select: 'minmax(150px,2fr)', number: '64px', amount: '96px', date: '150px', text: 'minmax(110px,1.4fr)' };
+function regTable(p, fields, counts) {
+  const cols = `28px ${fields.map((f) => COL_W[f.type] || COL_W.text).join(' ')} 36px`;
+  const minW = 28 + 36 + fields.reduce((n, f) => n + ({ select: 150, number: 64, amount: 96, date: 150 }[f.type] || 110), 0) + (fields.length + 1) * 6;
+  const head = `<div class="rt-head" style="grid-template-columns:${cols}"><span>#</span>${fields.map((f) => `<span>${esc(f.label)}${f.required && f.type !== 'amount' ? '<b class="req">*</b>' : ''}</span>`).join('')}<span></span></div>`;
+  return `<div class="card" style="padding:10px">
+    <div class="rt-scroll"><div style="min-width:${minW}px">
+      ${head}
+      <div id="rows">${S.ui.rows.map((row, i) => formRow(p, fields, row, i, counts, cols)).join('')}</div>
+    </div></div>
+    <div class="row between" style="margin-top:8px">
+      <button type="button" class="btn sm" data-action="add-row">＋ 再登記一項</button>
+      <span class="small" id="reg-total">${regTotalText(p, fields)}</span>
+    </div>
   </div>`;
 }
+function regTotalText(p, fields, rows = S.ui.rows) {
+  const amt = fields.find((f) => f.type === 'amount');
+  const sum = amt ? rows.reduce((n, r) => n + amountFor(p, amt, r.values), 0) : 0;
+  return `共 <b>${rows.length}</b> 項${amt ? `・合計 <b>${fmtTWD(sum)}</b>` : ''}`;
+}
+function formRow(p, fields, row, i, counts, cols) {
+  const ms = mainSelect(fields);
+  const prods = sortedProducts();
+  const cells = fields.map((f) => {
+    const v = row.values[f.id] ?? '';
+    const req = f.required && f.type !== 'amount';
+    const nm = `name="f:${esc(f.id)}" aria-label="${esc(f.label)}"`;
+    if (f.type === 'select') {
+      return `<div><select class="in" ${nm} data-change="row-calc" ${req ? 'required' : ''}>
+        <option value="">請選擇</option>
+        ${prods.map((pr) => { const s = stockInfo(pr, counts); const dis = s.full && v !== pr.id; return `<option value="${esc(pr.id)}" ${v === pr.id ? 'selected' : ''} ${dis ? 'disabled' : ''}>${esc(selectText(f, pr, p))}${s.full ? '（已額滿）' : ''}</option>`; }).join('')}
+      </select>${ms && f.id === ms.id ? `<small class="muted stock-hint">${stockHint(productById(v), counts)}</small>` : ''}</div>`;
+    }
+    if (f.type === 'amount') return `<div><input class="in" readonly data-amount="${esc(f.id)}" value="${fmtTWD(amountFor(p, f, row.values))}" tabindex="-1" aria-label="${esc(f.label)}"></div>`;
+    if (f.type === 'number') return `<div><input class="in" type="number" min="1" step="1" inputmode="numeric" ${nm} value="${esc(v || (req ? 1 : ''))}" data-input="row-calc" ${req ? 'required' : ''}></div>`;
+    if (f.type === 'date') return `<div><input class="in" type="date" ${nm} value="${esc(v)}" ${req ? 'required' : ''}></div>`;
+    return `<div><input class="in" ${nm} value="${esc(v)}" maxlength="200" ${req ? 'required' : ''}></div>`;
+  }).join('');
+  return `<div class="item-row rt-row" data-row="${esc(row.id)}" style="grid-template-columns:${cols}">
+    <span class="rt-no">${i + 1}</span>${cells}
+    ${S.ui.rows.length > 1 ? `<button type="button" class="btn sm ghost icon-btn" data-action="del-row" data-row="${esc(row.id)}" aria-label="移除第 ${i + 1} 項">✕</button>` : '<span></span>'}
+  </div>`;
+}
+const wlText = (wl) => (wl === Infinity ? '不限' : wl === 0 ? '不開放' : wl);
 function stockHint(pr, counts) {
   if (!pr) return '';
   const s = stockInfo(pr, counts);
   if (s.full) return '已額滿';
-  if (s.left > 0) return `還可登記 ${s.left} 個${s.wl ? `（另可候補 ${s.waitLeft}）` : ''}`;
-  return `正取已滿，候補還剩 ${s.waitLeft} 個`;
+  return s.left > 0 ? `還可登記 ${s.left} 個` : '目前已滿，登記後依順序遞補';
 }
 function readRows() {
   const form = $('#reg-form');
@@ -758,6 +836,11 @@ function updateRowCalc(rowEl) {
     const f = fields.find((x) => x.id === el.dataset.amount);
     if (f) el.value = fmtTWD(amountFor(p, f, values));
   });
+  const tot = $('#reg-total');
+  if (tot) {
+    const rows = $$('.item-row').map((el) => { const v = {}; $$('[name^="f:"]', el).forEach((i) => { v[i.name.slice(2)] = i.value; }); return { values: v }; });
+    tot.innerHTML = regTotalText(p, fields, rows);
+  }
   const ms = mainSelect(fields);
   const hint = $('.stock-hint', rowEl);
   if (hint && ms) hint.textContent = stockHint(productById(values[ms.id]), countsByProduct(S.ui.editingOrder));
@@ -803,8 +886,8 @@ async function submitForm() {
   try {
     if (S.ui.editingOrder) await S.store.updateOrder(p.id, S.ui.editingOrder, { items, updatedAt: now });
     else await S.store.createOrder(p.id, { buyerName: name, orderValues, items, createdAt: now, updatedAt: now });
-    localStorage.setItem('daigou-name', name);
-    toast(S.ui.editingOrder ? '已更新登記！' : '登記成功！等賣家審核喔');
+    const wasEdit = !!S.ui.editingOrder;
+    if (wasEdit || !showSubmitPopup(p)) toast(wasEdit ? '已更新登記！' : '登記成功！等賣家審核喔');
     S.ui.editingOrder = null; S.ui.rows = null; S.ui.overviewSeg = 'reg';
     go(`#/p/${p.id}/overview`);
   } catch { if (btn) btn.disabled = false; }
@@ -827,20 +910,20 @@ function regOverview(p) {
     ? sgn * productNameOf(a.it).localeCompare(productNameOf(b.it), 'zh-Hant') || (a.o.updatedAt - b.o.updatedAt)
     : sgn * ((a.o.updatedAt || 0) - (b.o.updatedAt || 0)));
   const people = new Set(S.cur.orders.map((o) => personKey(o.buyerName))).size;
+  const names = displayNames();
   const myUid = S.user?.uid;
   const canEdit = (o) => !isOwner() && p.status === 'open' && o.uid === myUid && !o.review;
   const sorts = [['time-asc', '時間：舊→新'], ['time-desc', '時間：新→舊'], ['name-asc', '商品名稱：A→Z'], ['name-desc', '商品名稱：Z→A']];
   return `<div class="row between" style="margin-bottom:12px">
-      <span class="muted small">共 ${people} 人・${rows.length} 項</span>
+      <span class="muted small">共 ${people} 人・${S.cur.orders.length} 筆・${rows.length} 項</span>
       <select class="in" style="width:auto;min-height:40px" data-change="sort" aria-label="排序">${sorts.map(([v, l]) => `<option value="${v}" ${S.ui.sort === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
     </div>
-    ${k === 'time' && rows.length ? groupedByPerson(p, fields, sgn, canEdit) : rows.length ? rows.map(({ o, it, st }) => `<article class="card reg">
+    ${k === 'time' && rows.length ? groupedByOrder(p, fields, sgn, canEdit) : rows.length ? rows.map(({ o, it, st }) => `<article class="card reg">
       <div class="row between">
-        <div class="grow"><b>${esc(o.buyerName)}</b> <span class="muted">・</span> ${esc(productNameOf(it))}</div>
-        <span class="chip ${st.s}">${REVIEW[st.s]}</span>
+        <div class="grow"><b>${esc(names[o.id])}</b> <span class="muted">・</span> ${itemName(it, st)}</div>
+        ${statusChip(st)}
       </div>
       <div class="fields">${itemSummary(p, it, fields)}</div>
-      ${st.s === 'rejected' && st.reason ? `<div class="reason">未通過原因：${esc(st.reason)}</div>` : ''}
       <div class="row between" style="margin-top:4px">
         <span class="muted small">最後編輯 ${fmtTime(o.updatedAt)}</span>
         ${canEdit(o) ? `<span class="row"><button class="btn sm" data-action="edit-order" data-oid="${esc(o.id)}">修改</button><button class="btn sm ghost" data-action="cancel-order" data-oid="${esc(o.id)}">取消登記</button></span>` : ''}
@@ -848,37 +931,34 @@ function regOverview(p) {
     </article>`).join('') : '<div class="empty">還沒有人登記</div>'}`;
 }
 // 同一個登記人（名字相同）的多次登記，合併在同一張卡片
+// 同名的人第 2 次以後送出的登記，顯示成「名字_2」「名字_3」…
+function displayNames() {
+  const byKey = {}, out = {};
+  [...S.cur.orders].sort((a, b) => (a.createdAt || a.updatedAt || 0) - (b.createdAt || b.updatedAt || 0)).forEach((o) => {
+    const k = personKey(o.buyerName);
+    byKey[k] = (byKey[k] || 0) + 1;
+    out[o.id] = byKey[k] > 1 ? `${String(o.buyerName).trim()}_${byKey[k]}` : String(o.buyerName).trim();
+  });
+  return out;
+}
 const personKey = (name) => String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
-function groupedByPerson(p, fields, sgn, canEdit) {
-  const groups = new Map();
-  for (const o of S.cur.orders) {
-    const key = personKey(o.buyerName);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(o);
-  }
-  const list = [...groups.values()].map((orders) => {
-    orders.sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0));
-    return { orders, first: orders[0].updatedAt || 0 };
-  }).sort((a, b) => sgn * (a.first - b.first));
-  return list.map(({ orders }) => {
-    const last = orders[orders.length - 1];
-    const nItems = orders.reduce((n, o) => n + (o.items?.length || 0), 0);
-    return `<article class="card reg">
-      <div class="row between"><b style="font-size:18px">${esc(last.buyerName)}</b><span class="muted small">${orders.length > 1 ? `${orders.length} 次登記・` : ''}共 ${nItems} 項</span></div>
-      ${orderExtras(p, last, true)}
-      ${orders.map((o, k) => `<div class="order-items" style="margin-top:6px">
-        <div class="row between small muted" style="border-top:2px dashed rgba(62,58,57,.3);padding-top:6px">
-          <span>${orders.length > 1 ? `第 ${k + 1} 次・` : ''}最後編輯 ${fmtTime(o.updatedAt)}</span>
-          ${canEdit(o) ? `<span class="row"><button class="btn sm" data-action="edit-order" data-oid="${esc(o.id)}">修改</button><button class="btn sm ghost" data-action="cancel-order" data-oid="${esc(o.id)}">取消登記</button></span>` : ''}
-        </div>
-        ${(o.items || []).map((it) => { const st = itemStatus(o, it); return `<div style="border:0;padding:6px 0 2px">
-          <div class="row between"><span>${esc(productNameOf(it))}</span><span class="chip ${st.s}">${REVIEW[st.s]}</span></div>
+function groupedByOrder(p, fields, sgn, canEdit) {
+  const names = displayNames();
+  const orders = [...S.cur.orders].sort((a, b) => sgn * ((a.updatedAt || 0) - (b.updatedAt || 0)));
+  return orders.map((o) => `<article class="card reg">
+      <div class="row between"><b style="font-size:18px">${esc(names[o.id])}</b><span class="muted small">共 ${o.items?.length || 0} 項</span></div>
+      ${orderExtras(p, o, true)}
+      <div class="order-items" style="margin-top:6px">
+        ${(o.items || []).map((it) => { const st = itemStatus(o, it); return `<div style="padding:6px 0 2px">
+          <div class="row between" style="align-items:flex-start"><span class="grow">${itemName(it, st)}</span>${statusChip(st)}</div>
           <div class="fields" style="margin-top:0">${itemSummary(p, it, fields)}</div>
-          ${st.s === 'rejected' && st.reason ? `<div class="reason">未通過原因：${esc(st.reason)}</div>` : ''}
         </div>`; }).join('')}
-      </div>`).join('')}
-    </article>`;
-  }).join('');
+      </div>
+      <div class="row between small muted" style="border-top:2px dashed rgba(62,58,57,.3);padding-top:6px;margin-top:4px">
+        <span>最後編輯 ${fmtTime(o.updatedAt)}</span>
+        ${canEdit(o) ? `<span class="row"><button class="btn sm" data-action="edit-order" data-oid="${esc(o.id)}">修改</button><button class="btn sm ghost" data-action="cancel-order" data-oid="${esc(o.id)}">取消登記</button></span>` : ''}
+      </div>
+    </article>`).join('');
 }
 function productOverview(p) {
   const counts = countsByProduct();
@@ -886,14 +966,14 @@ function productOverview(p) {
   const code = p.currency || 'JPY';
   return infoBlock(p) + '<div style="height:16px"></div>' + (list.length ? list.map((pr) => {
     const s = stockInfo(pr, counts);
-    const total = Math.max(1, s.qty + s.wl);
     const main = Math.min(s.used, s.qty), wait = Math.min(s.waitUsed, s.wl);
+    const total = Math.max(1, s.qty + (s.wl === Infinity ? wait : s.wl));
     return `<article class="card prod">
       <div class="thumb">${safeImg(pr.image) ? `<img src="${esc(pr.image)}" alt="" loading="lazy">` : '🛍️'}</div>
       <div style="min-width:0">
         <h4>${esc(pr.name)}</h4>
         <div class="price">${fmtTWD(twdOf(pr, p))} <span class="muted small">（${fmtFX(pr.foreignPrice, code)}）</span></div>
-        <div class="kv"><span>可登記 <b>${s.qty}</b></span><span>已登記 <b>${s.used}</b></span><span>剩餘 <b>${s.left}</b></span>${s.wl ? `<span>候補 <b>${wait}/${s.wl}</b></span>` : ''}</div>
+        <div class="kv"><span>可登記 <b>${s.qty}</b></span><span>已登記 <b>${s.used}</b></span><span>剩餘 <b>${s.left}</b></span>${s.wl === Infinity ? (wait ? `<span>候補 <b>${wait}</b></span>` : '') : s.wl ? `<span>候補 <b>${wait}/${s.wl}</b></span>` : ''}</div>
         <div class="meter" aria-hidden="true"><i style="width:${main / total * 100}%;background:var(--coral)"></i><i style="width:${wait / total * 100}%;background:var(--yellow)"></i></div>
         ${s.full ? '<span class="chip rejected" style="margin-top:6px">已額滿</span>' : s.left === 0 ? '<span class="chip pending" style="margin-top:6px">只剩候補</span>' : ''}
       </div>
@@ -923,6 +1003,10 @@ function renderMenu() {
 //  動作
 // ------------------------------------------------------------
 const draftOf = (el) => (el.dataset.g === 'order' ? S.ui.orderDraft : S.ui.fieldsDraft);
+async function saveQr(src) {
+  await S.store.updateProject(S.cur.pid, { popup: { ...(S.cur.project.popup || {}), qr: src } });
+  toast('QR Code 已更新 ✓');
+}
 const actions = {
   'menu': () => $('#menu').classList.toggle('hidden'),
   'menu-close': () => $('#menu').classList.add('hidden'),
@@ -967,11 +1051,17 @@ const actions = {
     if (!title) return toast('標題不能空白');
     const rate = num($('#pj-rate').value);
     if (rate <= 0) return toast('匯率要大於 0');
+    if ($('#pj-pop-link').value.trim() && !popupLinkInput()) return toast('LINE 連結要是 https:// 開頭');
     await S.store.updateProject(S.cur.pid, {
       title, description: $('#pj-desc').value.trim(), currency: $('#pj-cur').value, rate, updatedAt: Date.now(),
+      popup: { ...(S.cur.project.popup || {}), text: $('#pj-pop-text').value.trim(), link: popupLinkInput() },
     });
     toast('已儲存 ✓');
   },
+  async 'qr-upload'() { const src = await pickFile(); if (src) await saveQr(src); },
+  async 'qr-paste'() { const src = await clipboardImage(); if (src) await saveQr(src); },
+  async 'qr-clear'() { await S.store.updateProject(S.cur.pid, { popup: { ...(S.cur.project.popup || {}), qr: '' } }); },
+  'popup-preview': () => showSubmitPopup({ popup: { ...(S.cur.project.popup || {}), text: $('#pj-pop-text').value.trim(), link: popupLinkInput() } }, true),
   async 'cover-svg'(el) { await S.store.updateProject(S.cur.pid, { cover: { type: 'svg', key: el.dataset.key } }); },
   async 'cover-upload'() {
     const src = await pickFile(); if (!src) return;
@@ -1018,7 +1108,7 @@ const actions = {
     if ($('#pm-fx').value === '') return toast('請填外幣金額');
     const old = el.dataset.id ? productById(el.dataset.id) : null;
     const data = {
-      name, image: S.ui.modalImage || '', qty: Math.max(0, qty), waitlistMax: Math.max(0, Math.floor(num($('#pm-wl').value))),
+      name, image: S.ui.modalImage || '', qty: Math.max(0, qty), waitlistMax: $('#pm-wl').value.trim() === '' ? null : Math.max(0, Math.floor(num($('#pm-wl').value))),
       foreignPrice: fx, order: old?.order ?? Date.now(), updatedAt: Date.now(),
     };
     await S.store.saveProduct(S.cur.pid, el.dataset.id || null, data);

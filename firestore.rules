@@ -49,7 +49,7 @@ service cloud.firestore {
           && request.resource.data.uid == request.auth.uid
           && validOrder(request.resource.data));
 
-        // 客人修改自己的登記：還沒被審核前才可以，只能改名字、項目、時間
+        // 客人修改自己的登記：還沒被審核前才可以，只能改項目、時間
         // 賣家可以改任何東西（審核）
         allow update: if isOwner() || (signedIn()
           && guestCanRegister(pid)
