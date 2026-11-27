@@ -112,6 +112,9 @@ function handleError(e, src) {
   const code = e?.code || '';
   console.error(e);
   if (code === 'resource-exhausted' || code === 'auth/quota-exceeded') return showQuota();
+  if (src === 'watch' && !S.cur.pid) { // 首頁讀不到資料：顯示原因，不要一直轉圈
+    S.homeError = code || 'unknown'; if (!S.projects) S.projects = []; render(true); return;
+  }
   if (code === 'permission-denied') {
     if (src === 'watch') { if (S.cur.pid) { S.cur.denied = true; render(true); } return; }
     return toast('沒有權限執行這個動作（可能已被審核或已結單）');
@@ -275,7 +278,8 @@ function ensureSubs() {
 }
 function subscribeProjects() {
   if (S.unsubProjects) S.unsubProjects();
-  S.unsubProjects = S.store.watchProjects(!!S.user?.isOwner, (list) => { S.projects = list; render(); });
+  S.homeError = '';
+  S.unsubProjects = S.store.watchProjects(!!S.user?.isOwner, (list) => { S.projects = list; S.homeError = ''; render(); });
 }
 
 // ------------------------------------------------------------
@@ -348,6 +352,9 @@ function viewHome() {
       </div>
       <div class="hero-art" id="hero-art">${heroSvg || '<span class="small">首頁插圖預留區（SVG）</span>'}</div>
     </section>
+    ${S.homeError ? `<div class="demo-banner" style="margin-top:16px;background:var(--coral-pale)">⚠️ ${S.homeError === 'permission-denied'
+      ? '資料庫拒絕讀取：請到 Firebase 主控台 → Firestore Database → 規則，貼上 firestore.rules 的內容（Email 換成你的）並按「發布」。'
+      : `讀取資料失敗（${esc(S.homeError)}）：請確認 Firebase 已建立 Firestore 資料庫。`}</div>` : ''}
     ${S.projects === null ? '<p class="center muted">載入中…</p>' : sections}
   </div>`;
 }
